@@ -5,7 +5,7 @@ E_muon = 25. # muon energy in GeV
 
 det_min_baseline = 0 # average detector baseline in meters
 det_max_baseline = 755 # average detector baseline in meters
-det_length = 50.0 # detector length in meters
+det_length = 100.0 # detector length in meters
 det_radius = 5.0 # detector radius in meters
 
 G_F = 1.1663787e-5 # Fermi coupling constant in GeV^-2

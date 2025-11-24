@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.integrate import quad
-from constants import *
+from src.constants import *
 
 
 def muon_differential_decay_width(E_N, m_N, Umu2, Ue2):

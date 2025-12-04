@@ -10,6 +10,8 @@ det_radius = 5.0 # detector radius in meters
 
 G_F = 1.1663787e-5 # Fermi coupling constant in GeV^-2
 m_mu = 0.1056583745 # muon mass in GeV
+m_e = 0.0005109989461 # electron mass in GeV
 sin2_theta_W = 0.23126 # weak mixing angle
+alpha = 1/137.035999084 # fine-structure constant
 c = 3e8 # speed of light in m/s
 hbar_in_GeV_s = 6.582119569e-25 # hbar in GeV*s

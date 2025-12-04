@@ -67,7 +67,7 @@ def muon_total_decay_width(m_N, Umu2, Ue2):
 Gamma_muon = muon_total_decay_width(0,1,0)
 
 
-def HNL_decay_width(m_N, U2):
+def HNL_decay_width(m_N, U2, d=0):
     """Calculate the decay width of a Heavy Neutral Lepton (HNL).
 
     Parameters:
@@ -75,20 +75,24 @@ def HNL_decay_width(m_N, U2):
         Mass of the HNL in GeV.
     U2 : float
         Mixing parameter squared.
+    d : float
+        Transition magnetic moment in GeV^-1.
 
     Returns:
     float
         Decay width in GeV.
     """
     G_F = 1.1663787e-5 # Fermi coupling constant in GeV^-2
-    return (G_F**2 * m_N**5 * U2) / (192 * np.pi**3)
+    mixing_gamma = (G_F**2 * m_N**5 * U2) / (192 * np.pi**3)
+    magnetic_gamma = (d**2 * m_N**3) / (4 * np.pi)
+    return mixing_gamma + magnetic_gamma
 
 
 def HNL_decay_width_approx(m_N, U2):
     Gamma_mu = muon_total_decay_width(0,1,0)
     return Gamma_mu*(m_N/m_mu)**5 * U2
 
-def HNL_decay_length(m_N, U2, E_N):
+def HNL_decay_length(m_N, U2, E_N , d=0):
     """Calculate the decay length of a Heavy Neutral Lepton (HNL).
 
     Parameters:
@@ -98,17 +102,19 @@ def HNL_decay_length(m_N, U2, E_N):
         Mixing parameter squared.
     E_N : float
         Energy of the HNL in GeV.
+    d : float
+        Transition magnetic moment in GeV^-1.
 
     Returns:
     float
         Decay length in meters.
     """
-    decay_width = HNL_decay_width(m_N, U2)
+    decay_width = HNL_decay_width(m_N, U2, d)
     gamma = E_N / m_N
 
     return (hbar_in_GeV_s * c * gamma) / decay_width
 
-def HNL_ee_decay_width(m_N, Umu2, Ue2):
+def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
     """Calculate the decay width of HNL to e+ e- nu.
 
     Parameters:
@@ -118,6 +124,8 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2):
         Muon mixing parameter squared.
     Ue2 : float
         Electron mixing parameter squared.
+    d : float
+        Transition magnetic moment in GeV^-1.
 
     Returns:
     float
@@ -127,9 +135,20 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2):
     prefactor = (G_F**2 * m_N**5) / (768 * np.pi**3)
     term_mu = Umu2 * (1 - 4 * sin2_theta_W + 8 * sin2_theta_W**2)
     term_e = Ue2 * (1 + 4 * sin2_theta_W + 8 * sin2_theta_W**2)
-    return prefactor * (term_mu + term_e)
+    mixing_gamma = prefactor * (term_mu + term_e)
 
-def expected_HNL_events(m_N, Umu2, Ue2, det_eff = 1):
+    r = m_e/m_N
+    L = np.zeros_like(r)
+    if 2*r > 1:
+        L = 0
+    elif r < 1e-1:
+        L = 2*np.log(1/r) - 3.5
+    else:
+        L = (2 - (r**6)/8) * np.cosh(r) - (24 - 10*r**2 + r**4) / 8 * np.sqrt(1 - 4*r**2)
+    magnetic_gamma = alpha*d**2 * m_N**3 / (12 * np.pi) * L
+    return mixing_gamma + magnetic_gamma
+
+def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):
     """Calculate the expected number of HNL decay events in the detector.
 
     Parameters:
@@ -147,8 +166,8 @@ def expected_HNL_events(m_N, Umu2, Ue2, det_eff = 1):
 
     prefactor = N_muon_decays * det_eff / Gamma_muon
 
-    dw = HNL_decay_width(m_N, Umu2+Ue2)
-    ee_dw = HNL_ee_decay_width(m_N, Umu2, Ue2)
+    dw = HNL_decay_width(m_N, Umu2+Ue2, d=d)
+    ee_dw = HNL_ee_decay_width(m_N, Umu2, Ue2, d=d)
 
     def integrand(E_N):
         dGamma_mu = muon_differential_decay_width(E_N, m_N, Umu2, Ue2)

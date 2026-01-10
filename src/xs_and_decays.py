@@ -112,7 +112,7 @@ def HNL_decay_length(m_N, U2, E_N , d=0):
     decay_width = HNL_decay_width(m_N, U2, d)
     gamma = E_N / m_N
 
-    return (hbar_in_GeV_s * c * gamma) / decay_width
+    return (hbar_in_GeV_s * speed_of_light * gamma) / decay_width
 
 def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
     """Calculate the decay width of HNL to e+ e- nu.
@@ -145,6 +145,39 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
     L = np.where(2*r > 1, 0, L)
     magnetic_gamma = alpha*d**2 * m_N**3 / (12 * np.pi) * L
     return mixing_gamma + magnetic_gamma
+
+# cross section for mu nucleon to HNL nucleon
+def sigma(E_mu, m_N, U2):
+    s = 2 * m_nucleon * E_mu  # COM energy squared, nucleon at rest
+    sqrt_s = np.sqrt(s)
+
+    # Threshold behavior with smoothing
+    # Use a form that transitions more smoothly near kinematic limits
+    s_threshold = (m_N + m_mu)**2
+
+    # Basic threshold factor
+    if np.isscalar(m_N):
+        if s <= s_threshold or m_N >= sqrt_s - m_mu:
+            return 0.0
+    else:
+        mask = (s <= s_threshold) | (m_N >= sqrt_s - m_mu)
+
+    # Simplified phase space with polynomial suppression near edges
+    # This gives smoother behavior than Kallen function
+    x = m_N / sqrt_s  # Fractional mass
+
+    # Phase space factor that vanishes at x=0 and x~1
+    # Using (1-x^2)^n form which is common for phase space
+    phase_space = (1 - x**2)**10
+
+    # Cross section
+    sigma_val = 5e-1 * (s/320) * phase_space * U2  # in pb
+
+    if not np.isscalar(m_N):
+        sigma_val = np.where(mask, 0.0, sigma_val)
+
+    return sigma_val * picobarn_to_m2  # convert to m^2
+
 
 def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):
     """Calculate the expected number of HNL decay events in the detector.

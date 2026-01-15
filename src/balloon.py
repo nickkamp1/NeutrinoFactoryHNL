@@ -219,7 +219,7 @@ class HNLFluxGeometry:
         The distribution is forward-peaked with characteristic angle ~ m_N/E_mu.
         """
         # Characteristic production angle
-        theta_char = m_N / self.E_mu
+        theta_char = 0.1#m_N / self.E_mu
 
         # Sample polar angles relative to beam direction
         # Use exponential distribution for forward-peaked behavior
@@ -301,7 +301,7 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     valid_decay = above_surface & below_satellite
 
     if not np.any(valid_decay):
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
     # For valid decays, compute Cherenkov photons
     photon_counts = []

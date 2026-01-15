@@ -31,7 +31,7 @@ theta_C = np.arccos(1./n_air) # cherenkov angle
 Ch_dN_dx = 2*np.pi/137 * np.sin(theta_C)**2 * (1/300 - 1/1000) * 1e9 # in m^-1
 
 # balloon
-L_det = 33e3 # m
+L_det = 10e3 # m
 R_det = 2 # m
 
 # earth

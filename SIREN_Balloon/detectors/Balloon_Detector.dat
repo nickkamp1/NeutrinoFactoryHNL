@@ -1,0 +1,62 @@
+# Detector model file
+# Detector: Balloon HNL Detection Experiment
+# Version: v1
+# Date: 2025-01-15
+# Authors: Nicholas Kamp (with Claude)
+# Notes:
+#   Balloon/satellite detection of HNL decays from upward muon beam
+#   Coordinate system: origin at Earth surface, z-axis upward
+#   All dimensions in meters
+#
+# Geometry:
+#   - Underground rock target where muons produce HNLs
+#   - Atmosphere with discrete density layers (approximating exponential)
+#   - Disk detector at 10 km altitude
+
+# Surrounding rock (extends deep below surface)
+# Large box containing everything underground
+object box     0 0 -50000   0 0 0   200000 200000 100000   earth_rock   ROCK   constant   2.65
+
+# Target region - dense rock where muons scatter to produce HNLs
+# Centered at depth=200m, length=400m along beam (z direction)
+object box     0 0 -200     0 0 0   100 100 400   target_rock   ROCK   constant   2.65
+
+# Atmosphere in discrete layers (approximating exponential density)
+# rho(z) = rho_0 * exp(-z/H) with rho_0 = 1.225 kg/m^3, H = 8500 m
+# Layer densities are averages over each altitude band (in g/cm^3)
+
+# Layer 1: 0-2 km, avg density at 1 km
+object box   0 0 1000     0 0 0   200000 200000 2000   atm_layer_1   AIR   constant   1.112e-3
+
+# Layer 2: 2-4 km, avg density at 3 km
+object box   0 0 3000     0 0 0   200000 200000 2000   atm_layer_2   AIR   constant   0.905e-3
+
+# Layer 3: 4-6 km, avg density at 5 km
+object box   0 0 5000     0 0 0   200000 200000 2000   atm_layer_3   AIR   constant   0.736e-3
+
+# Layer 4: 6-8 km, avg density at 7 km
+object box   0 0 7000     0 0 0   200000 200000 2000   atm_layer_4   AIR   constant   0.599e-3
+
+# Layer 5: 8-10 km, avg density at 9 km
+object box   0 0 9000     0 0 0   200000 200000 2000   atm_layer_5   AIR   constant   0.487e-3
+
+# Layer 6: 10-15 km, avg density at 12.5 km
+object box   0 0 12500    0 0 0   200000 200000 5000   atm_layer_6   AIR   constant   0.348e-3
+
+# Layer 7: 15-25 km, avg density at 20 km
+object box   0 0 20000    0 0 0   200000 200000 10000  atm_layer_7   AIR   constant   0.166e-3
+
+# Layer 8: 25-50 km, avg density at 37.5 km
+object box   0 0 37500    0 0 0   200000 200000 25000  atm_layer_8   AIR   constant   0.040e-3
+
+# Balloon detector - thin disk at 10 km altitude
+# Radius = 2 m, effectively a circular aperture
+# Using cylinder with small height to represent disk
+object cylinder   0 0 10000   0 0 0   2 2 0.1   balloon_detector   AIR   constant   1.225e-3
+
+# Detector position marker
+detector   0 0 10000
+
+# Fiducial volume - atmosphere region where HNL decays can be detected
+# Cylinder from surface to detector altitude, large transverse extent
+fiducial cylinder   0 0 5000   0 0 0   10000 10000 10000

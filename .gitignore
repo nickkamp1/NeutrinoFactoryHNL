@@ -54,3 +54,5 @@ Thumbs.db
 
 data/HNL_kinematics
 Figures
+cluster/logs
+data/scan_results

@@ -1,5 +1,6 @@
 # HNL Flux Geometry Model - Upward Beam Configuration
 import numpy as np
+import pandas as pd
 
 from src.cherenkov import *
 from src.constants import *
@@ -133,6 +134,22 @@ def muon_energy_from_hnl_decay(m_N, E_N):
 
     return E_mu_mean, E_mu_std
 
+# This function approximates the theta distribution of HNLs
+def P_theta(theta):
+    theta_lowmid,theta_midhigh = 3e-4,0.01
+    a0_low,a1_low = 12.1,3.3
+    a1_mid = 0.5
+    a0_mid = a0_low - (a1_mid - a1_low)*np.log(theta_lowmid)
+    a1_high = -2.5
+    a0_high = a0_mid - (a1_high - a1_mid)*np.log(theta_midhigh)
+    a0 = np.where(theta<theta_lowmid,a0_low,a0_mid)
+    a0 = np.where(theta>theta_midhigh,a0_high,a0)
+    a1 = np.where(theta<theta_lowmid,a1_low,a1_mid)
+    a1 = np.where(theta>theta_midhigh,a1_high,a1)
+    y = np.exp(a0 + a1*np.log(theta))
+    norm = 1./np.sum(y)
+    return y*norm
+
 class HNLFluxGeometry:
     """
     Model for HNL production from a muon beam emerging from the Earth.
@@ -184,6 +201,19 @@ class HNLFluxGeometry:
         # Satellite position (directly above origin)
         self.satellite_pos = np.array([0, 0, satellite_height])
 
+        self.hnl_mc = {}
+        self.available_masses = []
+        for mass in [5,6,7,8,9,10,20,30,40,50,60,70,80,90,95,96]:
+            filename = "data/HNL_kinematics/Momentum%2.1f.dat" % mass
+            self.hnl_mc[mass] = pd.read_csv(filename, sep=r'\s+')
+            self.available_masses.append(mass)
+        self.available_masses = np.array(self.available_masses)
+
+    def _nearest_mc_mass(self, m_N):
+        """Find the nearest available MC mass to the requested mass."""
+        idx = np.argmin(np.abs(self.available_masses - m_N))
+        return self.available_masses[idx]
+
     def sample_production_points(self, N_samples):
         """
         Sample HNL production points along the muon path in Earth.
@@ -218,12 +248,21 @@ class HNLFluxGeometry:
         HNLs are produced with angular spread around the beam direction.
         The distribution is forward-peaked with characteristic angle ~ m_N/E_mu.
         """
-        # Characteristic production angle
-        theta_char = 0.1#m_N / self.E_mu
 
-        # Sample polar angles relative to beam direction
-        # Use exponential distribution for forward-peaked behavior
-        theta_rel = np.random.exponential(theta_char, N_samples)
+        ## OLD treatment from Claude ##
+
+        # # Characteristic production angle
+        # theta_char = 0.1#m_N / self.E_mu
+
+        # # Sample polar angles relative to beam direction
+        # # Use exponential distribution for forward-peaked behavior
+        # theta_rel = np.random.exponential(theta_char, N_samples)
+
+        ## NEW treatment sampling from Peng-Cheng's simulation ##
+        theta_vector = np.logspace(-5,0,10*N_samples)
+        p_theta = P_theta(theta_vector)
+        theta_rel = np.random.choice(theta_vector,N_samples,p=p_theta)
+
 
         # Azimuthal angle is uniform
         phi_rel = np.random.uniform(0, 2*np.pi, N_samples)
@@ -256,6 +295,28 @@ class HNLFluxGeometry:
 
         return directions
 
+    def sample_kinematics(self, m_N, N_samples):
+        """
+        Sample HNL and muon kinematics from pre-computed MC data.
+
+        Samples N_samples events with replacement from the MC DataFrame
+        for the nearest available HNL mass.
+        """
+        mc_mass = self._nearest_mc_mass(m_N)
+        df = self.hnl_mc[mc_mass]
+        sampled = df.sample(n=N_samples, replace=True)
+
+        hnl_Ptot = np.sqrt(sampled.PNx.values**2 + sampled.PNy.values**2 + sampled.PNz.values**2)
+        hnl_dir = np.column_stack((sampled.PNx.values/hnl_Ptot,
+                                   sampled.PNy.values/hnl_Ptot,
+                                   sampled.PNz.values/hnl_Ptot))
+        mu_Ptot = np.sqrt(sampled.Pmux.values**2 + sampled.Pmuy.values**2 + sampled.Pmuz.values**2)
+        mu_dir = np.column_stack((sampled.Pmux.values/mu_Ptot,
+                                  sampled.Pmuy.values/mu_Ptot,
+                                  sampled.Pmuz.values/mu_Ptot))
+
+        return sampled.PNe.values, hnl_dir, sampled.Pmue.values, mu_dir
+
     def sample_decay_points(self, production_points, hnl_directions, decay_length):
         """
         Sample HNL decay points given production points, directions, and decay length.
@@ -270,25 +331,66 @@ class HNLFluxGeometry:
         return self.satellite_pos.copy()
 
 
+def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10):
+    """
+    Apply a photon threshold to raw simulation output and compute signal summary.
+
+    Parameters
+    ----------
+    photon_counts : array
+        Photon counts for valid-decay events (from compute_signal_at_satellite).
+    N_HNLs_per_muon : float
+        HNL production rate per muon (from compute_signal_at_satellite).
+    N_samples : int
+        Total number of MC samples used in the simulation.
+    min_photons : float
+        Minimum photon count for detection.
+
+    Returns
+    -------
+    detection_efficiency : float
+    mean_photons : float
+    number_of_events : float
+    """
+    detected = photon_counts >= min_photons
+    detection_efficiency = np.sum(detected) / N_samples
+    mean_photons = np.mean(photon_counts[detected]) if np.any(detected) else 0.0
+    number_of_events = N_HNLs_per_muon * detection_efficiency * N_muon_decays
+    return detection_efficiency, mean_photons, number_of_events
+
+
 def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
-                                N_samples=1000, min_photons=10):
+                                N_samples=1000):
     """
     Compute expected signal at a satellite position from HNL decays.
+
+    Returns raw photon counts and production rate so that different
+    photon thresholds can be applied after the fact via summarize_signal().
+
+    Returns
+    -------
+    photon_counts : ndarray
+        Photon count per MC sample (length N_samples).
+    N_HNLs_per_muon : float
+        Number of HNLs produced per muon.
     """
     sat_position = flux_geometry.get_satellite_position()
 
     HNL_xs = sigma(E_mu, m_N, U2)
-    E_N = E_mu / 2  # Approximate HNL energy
     N_HNLs_per_muon = HNL_xs * flux_geometry.L_target   * n_earth_m3  # number of HNLs produced per muon
 
-    # HNL decay length
-    decay_length = HNL_decay_length(m_N, U2, E_N)
+
 
     # Sample production points
     prod_points = flux_geometry.sample_production_points(N_samples)
 
-    # Sample HNL directions
-    hnl_dirs = flux_geometry.sample_hnl_directions(m_N, N_samples)
+    # # Sample HNL directions
+    # hnl_dirs = flux_geometry.sample_hnl_directions(m_N, N_samples)
+
+    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(m_N,N_samples)
+
+    # HNL decay length
+    decay_length = HNL_decay_length(m_N, U2, hnl_energy)
 
     # Sample decay points
     decay_points, travel_dist = flux_geometry.sample_decay_points(
@@ -301,37 +403,37 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     valid_decay = above_surface & below_satellite
 
     if not np.any(valid_decay):
-        return 0.0, 0.0, 0.0
+        return np.zeros(N_samples), N_HNLs_per_muon
 
     # For valid decays, compute Cherenkov photons
-    photon_counts = []
+    photon_counts = np.zeros(N_samples)
     valid_indices = np.where(valid_decay)[0]
 
     for idx in valid_indices:
         decay_pos = decay_points[idx]
         hnl_dir = hnl_dirs[idx]
+        mu_dir = mu_dirs[idx]
 
         # Position relative to satellite
         r_rel = decay_pos - sat_position
 
-        # Muon direction from HNL decay (boosted, so roughly along HNL direction)
-        gamma_N = E_N / m_N
-        theta_decay_spread = np.random.exponential(1/gamma_N)
-        phi_decay = np.random.uniform(0, 2*np.pi)
+        # # Muon direction from HNL decay (boosted, so roughly along HNL direction)
+        # gamma_N = E_N / m_N
+        # theta_decay_spread = np.random.exponential(1/gamma_N)
+        # phi_decay = np.random.uniform(0, 2*np.pi)
 
-        # Muon direction ≈ HNL direction with small spread
-        mu_dir = hnl_dir.copy()
-        # Add small perpendicular perturbation
-        perp = np.array([np.cos(phi_decay), np.sin(phi_decay), 0])
-        perp = perp - np.dot(perp, hnl_dir) * hnl_dir  # make perpendicular
-        if np.linalg.norm(perp) > 0:
-            perp = perp / np.linalg.norm(perp)
-            mu_dir = mu_dir + theta_decay_spread * perp
-            mu_dir = mu_dir / np.linalg.norm(mu_dir)
+        # # Muon direction ≈ HNL direction with small spread
+        # mu_dir = hnl_dir.copy()
+        # # Add small perpendicular perturbation
+        # perp = np.array([np.cos(phi_decay), np.sin(phi_decay), 0])
+        # perp = perp - np.dot(perp, hnl_dir) * hnl_dir  # make perpendicular
+        # if np.linalg.norm(perp) > 0:
+        #     perp = perp / np.linalg.norm(perp)
+        #     mu_dir = mu_dir + theta_decay_spread * perp
+        #     mu_dir = mu_dir / np.linalg.norm(mu_dir)
 
         # Only count if muon is going upward (can produce detectable Cherenkov)
         if mu_dir[2] <= 0:
-            photon_counts.append(0)
             continue
 
         r_0 = r_rel
@@ -339,30 +441,19 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
         # Muon track length
         decay_altitude = max(0, decay_pos[2])
-        E_mu_daughter, _ = muon_energy_from_hnl_decay(m_N, E_N)
+        E_mu_daughter = mu_energy[idx]
         track_length = muon_range_in_air(E_mu_daughter, decay_altitude,
-                                          direction_cosine=max(p_hat[2], 0.1))
+                                         direction_cosine=max(p_hat[2], 0.1))
 
         # Compute photons
-        N_track = max(1000, min(300, int(track_length / 100)))
+        N_track = min(1000, max(300, int(track_length / 100)))
         try:
             N_ph,_,_ = cherenkov_photons_detected_vectorized(
-                r_0, p_hat, track_length, R_det, N_psi=30, N_track=N_track
+                r_0, p_hat, track_length, R_det, N_psi=300, N_track=N_track
             )
         except:
             N_ph = 0
 
-        photon_counts.append(N_ph)
+        photon_counts[idx] = N_ph
 
-    photon_counts = np.array(photon_counts)
-
-    # Detection efficiency
-    detected = photon_counts >= min_photons
-    detection_efficiency = np.sum(detected) / N_samples
-
-    # Mean photons for detected events
-    mean_photons = np.mean(photon_counts[detected]) if np.any(detected) else 0.0
-
-    number_of_events = N_HNLs_per_muon * detection_efficiency * N_muon_decays
-
-    return detection_efficiency, mean_photons, number_of_events
+    return photon_counts, N_HNLs_per_muon

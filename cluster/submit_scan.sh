@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=hnl_balloon
 #SBATCH --partition=serial_requeue,shared,sapphire
-#SBATCH --array=101-279
-#SBATCH --time=0-1:00:00
+#SBATCH --array=0-279
+#SBATCH --time=0-5:00:00
 #SBATCH --mem=8G
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --output=cluster/logs/scan_%a.out
 #SBATCH --error=cluster/logs/scan_%a.err
 #SBATCH --requeue

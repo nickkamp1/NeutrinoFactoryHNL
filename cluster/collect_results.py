@@ -37,17 +37,22 @@ def load_raw_results(scan_dir="data/scan_results"):
     N_HNLs_per_muon = {}
     n_missing = 0
 
-    for m_N in MASSES:
+    missing_array_ids = []
+
+    for i_m,m_N in enumerate(MASSES):
         ph_all = np.zeros((len(U2_RANGE), N_samples))
         nhnl_all = np.zeros(len(U2_RANGE))
         mass_complete = True
 
-        for b in range(N_U2_BATCHES):
+        for i_b,b in enumerate(range(N_U2_BATCHES)):
+
+            array_idx = i_m * N_U2_BATCHES + i_b
             fpath = os.path.join(scan_dir, f"scan_mN_{m_N:.0f}_u2batch_{b:03d}.npz")
             if not os.path.exists(fpath):
                 print(f"  WARNING: missing {fpath}")
                 n_missing += 1
                 mass_complete = False
+                missing_array_ids.append(array_idx)
                 continue
             data = np.load(fpath)
             u2_start = int(data["u2_start"])
@@ -60,6 +65,8 @@ def load_raw_results(scan_dir="data/scan_results"):
 
     if n_missing > 0:
         print(f"  {n_missing} batch files missing out of {len(MASSES) * N_U2_BATCHES}")
+        print("To re-run missing batches, use: sbatch cluster/submit_scan.sh --array=")
+        print("  " + ",".join(f"{i}" for i in missing_array_ids))
 
     return photon_counts, N_HNLs_per_muon, U2_RANGE, N_samples
 

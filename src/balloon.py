@@ -9,6 +9,11 @@ from src.xs_and_decays import *
 # Realistic muon track length calculation
 # Muons lose energy via ionization in air; track length depends on energy and air density
 
+# Track length constants for different particle types in air
+PION_INTERACTION_LENGTH_GCM2 = 120.0   # nuclear interaction length in air [g/cm²]
+RADIATION_LENGTH_AIR_GCM2 = 36.62      # radiation length in air [g/cm²]
+E_CRITICAL_AIR = 0.080                  # critical energy for EM showers in air [GeV]
+
 def air_density(altitude_m):
     """
     Approximate air density as function of altitude using exponential atmosphere.
@@ -93,6 +98,133 @@ def muon_range_in_air(E_mu_GeV, start_altitude_m, direction_cosine=1.0):
     return min(range_m, L_mu)  # cap at muon decay length
 
 
+def pion_range_in_air(E_pi_GeV, start_altitude_m, direction_cosine=1.0):
+    """
+    Estimate charged pion track length in air.
+
+    Pions are stopped by nuclear interactions. The track length is
+    approximately one nuclear interaction length in air (~120 g/cm²).
+    At sea level (~1.225 kg/m³), this corresponds to ~1 km.
+    At higher altitudes, the lower density means longer geometric range.
+
+    Also limited by pion decay: tau_pi = 26 ns, so L_decay = beta*gamma*c*tau.
+
+    Parameters
+    ----------
+    E_pi_GeV : float
+        Pion kinetic energy [GeV]
+    start_altitude_m : float
+        Starting altitude [m]
+    direction_cosine : float
+        cos(theta) where theta is angle from vertical
+
+    Returns
+    -------
+    range_m : float
+        Pion effective track length [m]
+    """
+    m_pi = 0.13957  # GeV
+    gamma = E_pi_GeV / m_pi
+    beta = np.sqrt(1 - 1 / gamma**2) if gamma > 1 else 0.0
+
+    # Decay length
+    tau_pi = 26e-9  # seconds
+    L_decay = beta * gamma * speed_of_light * tau_pi
+
+    # Nuclear interaction length
+    rho = air_density(start_altitude_m)  # kg/m³
+    rho_gcm3 = rho * 1e-3  # g/cm³
+    if rho_gcm3 > 0:
+        L_interaction = PION_INTERACTION_LENGTH_GCM2 / rho_gcm3 / 100  # meters
+    else:
+        L_interaction = 1e6  # effectively infinite
+
+    return min(L_decay, L_interaction)
+
+
+def electron_shower_length_in_air(E_e_GeV, start_altitude_m):
+    """
+    Estimate the effective Cherenkov track length for an electromagnetic shower in air.
+
+    An electron/positron (or gamma from pi0) initiates an EM shower.
+    The effective track length for Cherenkov emission is approximately:
+        L_eff = X_0 * ln(E / E_c)
+    where X_0 is the radiation length and E_c is the critical energy.
+
+    This counts the total path length of all shower particles above Cherenkov threshold.
+
+    Parameters
+    ----------
+    E_e_GeV : float
+        Electron/gamma energy [GeV]
+    start_altitude_m : float
+        Starting altitude [m]
+
+    Returns
+    -------
+    range_m : float
+        Effective Cherenkov track length [m]
+    """
+    if E_e_GeV <= E_CRITICAL_AIR:
+        # Below critical energy, no shower development
+        return 0.0
+
+    rho = air_density(start_altitude_m)  # kg/m³
+    rho_gcm3 = rho * 1e-3  # g/cm³
+
+    if rho_gcm3 <= 0:
+        return 0.0
+
+    # Radiation length in meters at this altitude
+    X_0_m = RADIATION_LENGTH_AIR_GCM2 / rho_gcm3 / 100  # meters
+
+    # Number of radiation lengths for shower development
+    t_max = np.log(E_e_GeV / E_CRITICAL_AIR)
+
+    # Effective total track length: sum of all charged particle paths
+    # Approximation: N_charged ~ E/E_c at shower max, total track ~ X_0 * E/E_c
+    # More precisely, the total Cherenkov track length is:
+    #   L_total ~ X_0 * (E / E_c) for the integrated path of all charged particles
+    # But for a single effective track approximation:
+    L_eff = X_0_m * t_max
+
+    return L_eff
+
+
+def particle_track_length(particle_type, energy_GeV, altitude_m, direction_cosine=1.0):
+    """
+    Compute track length for any charged particle type in air.
+
+    Parameters
+    ----------
+    particle_type : str
+        One of 'muon', 'electron', 'pion_charged', 'pion_neutral'
+    energy_GeV : float
+        Particle energy [GeV]
+    altitude_m : float
+        Altitude above sea level [m]
+    direction_cosine : float
+        cos(theta) from vertical
+
+    Returns
+    -------
+    track_length : float
+        Track length in meters
+    """
+    if particle_type == 'muon':
+        return muon_range_in_air(energy_GeV, altitude_m, direction_cosine)
+    elif particle_type == 'pion_charged':
+        return pion_range_in_air(energy_GeV, altitude_m, direction_cosine)
+    elif particle_type == 'electron':
+        return electron_shower_length_in_air(energy_GeV, altitude_m)
+    elif particle_type == 'pion_neutral':
+        # pi0 -> 2 gamma -> EM showers
+        # Each gamma gets ~E/2, treat as single EM shower with full energy
+        return electron_shower_length_in_air(energy_GeV, altitude_m)
+    else:
+        return 0.0
+
+
 def muon_energy_from_hnl_decay(m_N, E_N):
     """
     Estimate muon energy from HNL decay N -> mu + X.
@@ -149,6 +281,65 @@ def P_theta(theta):
     y = np.exp(a0 + a1*np.log(theta))
     norm = 1./np.sum(y)
     return y*norm
+
+def muon_energy_in_earth(E_mu_initial, depth_m, rho=2.65):
+    """
+    Compute muon energy after propagating through standard rock.
+
+    Uses the continuous energy loss approximation:
+        -dE/dx = a + b*E
+    where a ≈ 2 MeV/(g/cm²) (ionization, minimum ionizing)
+    and b ≈ 3.5e-6 (g/cm²)^-1 (radiative: bremsstrahlung + pair production).
+
+    The analytic solution is:
+        E(x) = (E_0 + a/b) * exp(-b*x) - a/b
+    where x is in g/cm².
+
+    Parameters
+    ----------
+    E_mu_initial : float or array
+        Initial muon energy [GeV]
+    depth_m : float or array
+        Depth of propagation through rock [m]
+    rho : float
+        Rock density [g/cm³] (default: 2.65 for standard rock)
+
+    Returns
+    -------
+    E_mu : float or array
+        Muon energy after traversing depth [GeV]. Clipped to 0 if muon stops.
+    """
+    a = 2.0e-3   # GeV / (g/cm²) — ionization loss
+    b = 3.5e-6   # (g/cm²)^-1 — radiative loss coefficient
+
+    # Convert depth in meters to column depth in g/cm²
+    x = depth_m * 100 * rho  # depth_m * 100 cm/m * rho g/cm³ = g/cm²
+
+    E_mu = (E_mu_initial + a / b) * np.exp(-b * x) - a / b
+    return np.maximum(E_mu, 0.0)
+
+
+def muon_critical_energy(rho=2.65):
+    """
+    Return the critical energy where radiative losses equal ionization losses.
+    E_crit = a/b ≈ 571 GeV in standard rock.
+    """
+    a = 2.0e-3
+    b = 3.5e-6
+    return a / b
+
+
+def muon_max_range_in_earth(E_mu_initial, rho=2.65):
+    """
+    Maximum range of a muon in rock before it stops [m].
+
+    From E(x) = 0: x_max = (1/b) * ln(1 + b*E_0/a)
+    """
+    a = 2.0e-3
+    b = 3.5e-6
+    x_max = np.log(1 + b * E_mu_initial / a) / b  # g/cm²
+    return x_max / (100 * rho)  # convert to meters
+
 
 class HNLFluxGeometry:
     """
@@ -240,6 +431,91 @@ class HNLFluxGeometry:
 
         production_points = target_center + np.outer(s, self.beam_dir)
         return production_points
+
+    def compute_weighted_production_rate(self, m_N, U2, N_depth_bins=100):
+        """
+        Compute HNL production rate accounting for muon energy loss in Earth.
+
+        The muon enters the target region at the deepest point (target_depth + L_target/2
+        below the surface) and travels upward. Its energy decreases with depth
+        traversed (Bethe-Bloch + radiative), so the cross section varies along
+        the path.
+
+        Returns
+        -------
+        N_HNLs_per_muon : float
+            Total HNLs produced per muon, integrating sigma(E_mu(x)) along path.
+        depth_bins : ndarray
+            Depth values for each bin center [m below surface]
+        xs_weights : ndarray
+            Normalized cross-section weight at each depth bin (for importance sampling).
+        """
+        # The muon enters the rock at the bottom of the target region
+        # and travels upward toward the surface.
+        # Distance along beam path from entry point to surface = target_depth + L_target/2
+        # (for beam_offset_angle = 0)
+
+        # Discretize the target into depth bins
+        # depth_from_surface ranges from (target_depth + L_target/2) at entry
+        # to max(0, target_depth - L_target/2) at exit
+        depth_max = self.target_depth + self.L_target / 2  # deepest point
+        depth_min = max(0, self.target_depth - self.L_target / 2)  # shallowest
+
+        # Bin edges in terms of depth below surface
+        depth_edges = np.linspace(depth_max, depth_min, N_depth_bins + 1)
+        depth_centers = 0.5 * (depth_edges[:-1] + depth_edges[1:])
+        dx = np.abs(depth_edges[1] - depth_edges[0])  # bin width [m]
+
+        # Muon energy at each depth bin center
+        # The muon has traversed (depth_max - depth_center) meters of rock
+        # from its entry point
+        traversed = depth_max - depth_centers  # meters of rock from entry
+        E_mu_local = muon_energy_in_earth(self.E_mu, traversed)
+
+        # Cross section at each depth
+        xs_local = np.array([sigma(E, m_N, U2) for E in E_mu_local])  # m^2
+
+        # Integrated production rate: N = n_earth * sum(sigma_i * dx_i)
+        N_HNLs_per_muon = n_earth_m3 * np.sum(xs_local * dx)
+
+        # Normalized weights for importance sampling
+        xs_weights = xs_local * dx
+        total = np.sum(xs_weights)
+        if total > 0:
+            xs_weights = xs_weights / total
+        else:
+            xs_weights = np.ones(N_depth_bins) / N_depth_bins
+
+        return N_HNLs_per_muon, depth_centers, xs_weights
+
+    def sample_production_points_weighted(self, m_N, U2, N_samples, N_depth_bins=100):
+        """
+        Sample HNL production points weighted by local cross section.
+
+        Production positions are importance-sampled: positions where the muon
+        has higher energy (and thus higher cross section) are sampled more often.
+
+        Returns
+        -------
+        production_points : ndarray, shape (N_samples, 3)
+        N_HNLs_per_muon : float
+        """
+        N_HNLs_per_muon, depth_centers, xs_weights = \
+            self.compute_weighted_production_rate(m_N, U2, N_depth_bins)
+
+        # Sample depth bins according to cross-section weights
+        bin_indices = np.random.choice(len(depth_centers), size=N_samples, p=xs_weights)
+        # Add uniform jitter within each bin
+        dx = np.abs(depth_centers[1] - depth_centers[0]) if len(depth_centers) > 1 else 1.0
+        sampled_depths = depth_centers[bin_indices] + np.random.uniform(-dx/2, dx/2, N_samples)
+
+        # Convert depth below surface to 3D coordinates
+        target_center_z = -sampled_depths  # z coordinate (negative = underground)
+        target_center_x = -sampled_depths * np.tan(self.beam_offset_angle)
+        target_center_y = np.zeros(N_samples)
+
+        production_points = np.column_stack([target_center_x, target_center_y, target_center_z])
+        return production_points, N_HNLs_per_muon
 
     def sample_hnl_directions(self, m_N, N_samples):
         """
@@ -359,13 +635,131 @@ def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10):
     return detection_efficiency, mean_photons, number_of_events
 
 
+def sensitivity_criterion(S, B, method='gaussian', CL=0.95):
+    """
+    Evaluate whether a signal S is detectable above background B.
+
+    Parameters
+    ----------
+    S : float or array
+        Expected signal events
+    B : float or array
+        Expected background events
+    method : str
+        'gaussian' : S > n_sigma * sqrt(B) where n_sigma corresponds to CL
+        'poisson'  : S / sqrt(S + B) > n_sigma (profile likelihood approximation)
+        'simple'   : S > n_sigma * sqrt(B) (same as gaussian, kept for clarity)
+    CL : float
+        Confidence level (default 0.95 -> ~2 sigma)
+
+    Returns
+    -------
+    is_sensitive : bool or array
+        Whether the point passes the sensitivity criterion
+    significance : float or array
+        Test statistic value (number of sigmas)
+    """
+    from scipy.stats import norm
+
+    n_sigma = norm.ppf(CL)  # 1.645 for 95%, 1.96 for 97.5%
+
+    S = np.asarray(S, dtype=float)
+    B = np.asarray(B, dtype=float)
+
+    if method in ('gaussian', 'simple'):
+        # S > n_sigma * sqrt(B)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            significance = np.where(B > 0, S / np.sqrt(B), np.where(S > 0, np.inf, 0.0))
+        is_sensitive = significance > n_sigma
+
+    elif method == 'poisson':
+        # S / sqrt(S + B) > n_sigma
+        with np.errstate(divide='ignore', invalid='ignore'):
+            denom = np.sqrt(S + B)
+            significance = np.where(denom > 0, S / denom, 0.0)
+        is_sensitive = significance > n_sigma
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    return is_sensitive, significance
+
+
+def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
+                           N_samples, U2_arr, N_background,
+                           min_photons=10, method='gaussian', CL=0.95):
+    """
+    Find the sensitivity limit U2 for a given HNL mass from a pre-computed scan.
+
+    For each U2 value, computes the expected signal events and checks
+    if it exceeds the background-limited threshold.
+
+    Parameters
+    ----------
+    photon_counts_grid : array, shape (N_U2, N_samples)
+        Raw photon counts from compute_signal_at_satellite for each U2.
+    N_HNLs_per_muon_grid : array, shape (N_U2,)
+        Production rate for each U2.
+    N_samples : int
+        Number of MC samples used.
+    U2_arr : array
+        Array of U2 values scanned.
+    N_background : float
+        Expected background events for this geometry.
+    min_photons : float
+        Photon threshold for detection.
+    method : str
+        Sensitivity method ('gaussian', 'poisson').
+    CL : float
+        Confidence level.
+
+    Returns
+    -------
+    U2_limit : float or None
+        The smallest U2 that passes the sensitivity criterion, or None.
+    """
+    for i, U2 in enumerate(U2_arr):
+        _, _, S = summarize_signal(
+            photon_counts_grid[i], N_HNLs_per_muon_grid[i], N_samples, min_photons
+        )
+        is_sensitive, _ = sensitivity_criterion(S, N_background, method=method, CL=CL)
+        if is_sensitive:
+            return U2
+
+    return None
+
+
 def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
-                                N_samples=1000):
+                                N_samples=1000, use_energy_loss=True,
+                                use_all_channels=True, Umu2=None, Ue2=0.0):
     """
     Compute expected signal at a satellite position from HNL decays.
 
     Returns raw photon counts and production rate so that different
     photon thresholds can be applied after the fact via summarize_signal().
+
+    Parameters
+    ----------
+    m_N : float
+        HNL mass [GeV]
+    E_mu : float
+        Muon beam energy [GeV]
+    U2 : float
+        Mixing parameter squared (total)
+    flux_geometry : HNLFluxGeometry
+        Geometry configuration
+    N_samples : int
+        Number of MC samples
+    use_energy_loss : bool
+        If True, account for muon energy loss in Earth and weight production
+        by local cross section. If False, use the old uniform approximation.
+    use_all_channels : bool
+        If True, sample all HNL decay channels and sum Cherenkov from all
+        charged daughters. If False, use only the muon from MC data (old behavior).
+    Umu2 : float or None
+        Muon mixing parameter. If None, assumes Umu2 = U2 (pure muon mixing).
+    Ue2 : float
+        Electron mixing parameter (default 0).
 
     Returns
     -------
@@ -374,20 +768,22 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     N_HNLs_per_muon : float
         Number of HNLs produced per muon.
     """
+    if Umu2 is None:
+        Umu2 = U2
+
     sat_position = flux_geometry.get_satellite_position()
 
-    HNL_xs = sigma(E_mu, m_N, U2)
-    N_HNLs_per_muon = HNL_xs * flux_geometry.L_target   * n_earth_m3  # number of HNLs produced per muon
+    if use_energy_loss:
+        # Use energy-loss-weighted production
+        prod_points, N_HNLs_per_muon = \
+            flux_geometry.sample_production_points_weighted(m_N, U2, N_samples)
+    else:
+        # Old uniform approach
+        HNL_xs = sigma(E_mu, m_N, U2)
+        N_HNLs_per_muon = HNL_xs * flux_geometry.L_target * n_earth_m3
+        prod_points = flux_geometry.sample_production_points(N_samples)
 
-
-
-    # Sample production points
-    prod_points = flux_geometry.sample_production_points(N_samples)
-
-    # # Sample HNL directions
-    # hnl_dirs = flux_geometry.sample_hnl_directions(m_N, N_samples)
-
-    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(m_N,N_samples)
+    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(m_N, N_samples)
 
     # HNL decay length
     decay_length = HNL_decay_length(m_N, U2, hnl_energy)
@@ -411,49 +807,80 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
     for idx in valid_indices:
         decay_pos = decay_points[idx]
-        hnl_dir = hnl_dirs[idx]
-        mu_dir = mu_dirs[idx]
-
-        # Position relative to satellite
-        r_rel = decay_pos - sat_position
-
-        # # Muon direction from HNL decay (boosted, so roughly along HNL direction)
-        # gamma_N = E_N / m_N
-        # theta_decay_spread = np.random.exponential(1/gamma_N)
-        # phi_decay = np.random.uniform(0, 2*np.pi)
-
-        # # Muon direction ≈ HNL direction with small spread
-        # mu_dir = hnl_dir.copy()
-        # # Add small perpendicular perturbation
-        # perp = np.array([np.cos(phi_decay), np.sin(phi_decay), 0])
-        # perp = perp - np.dot(perp, hnl_dir) * hnl_dir  # make perpendicular
-        # if np.linalg.norm(perp) > 0:
-        #     perp = perp / np.linalg.norm(perp)
-        #     mu_dir = mu_dir + theta_decay_spread * perp
-        #     mu_dir = mu_dir / np.linalg.norm(mu_dir)
-
-        # Only count if muon is going upward (can produce detectable Cherenkov)
-        if mu_dir[2] <= 0:
-            continue
-
-        r_0 = r_rel
-        p_hat = mu_dir
-
-        # Muon track length
         decay_altitude = max(0, decay_pos[2])
-        E_mu_daughter = mu_energy[idx]
-        track_length = muon_range_in_air(E_mu_daughter, decay_altitude,
-                                         direction_cosine=max(p_hat[2], 0.1))
 
-        # Compute photons
-        N_track = min(1000, max(300, int(track_length / 100)))
-        try:
-            N_ph,_,_ = cherenkov_photons_detected_vectorized(
-                r_0, p_hat, track_length, R_det, N_psi=300, N_track=N_track
+        if use_all_channels:
+            # Sample full HNL decay with all channels
+            daughters = sample_hnl_decay(
+                m_N, hnl_energy[idx], hnl_dirs[idx], Umu2=Umu2, Ue2=Ue2
             )
-        except:
-            N_ph = 0
 
-        photon_counts[idx] = N_ph
+            if not daughters:
+                continue
+
+            N_ph_total = 0.0
+            for ptype, E_daughter, p_hat_daughter in daughters:
+                # Skip downward-going particles
+                if p_hat_daughter[2] <= 0:
+                    continue
+
+                r_rel = decay_pos - sat_position
+                dir_cosine = max(p_hat_daughter[2], 0.1)
+
+                track_length = particle_track_length(
+                    ptype, E_daughter, decay_altitude, dir_cosine
+                )
+
+                if track_length <= 0:
+                    continue
+
+                N_track = min(1000, max(100, int(track_length / 100)))
+                try:
+                    N_ph, _, _ = cherenkov_photons_detected_vectorized(
+                        r_rel, p_hat_daughter, track_length, R_det,
+                        N_psi=300, N_track=N_track
+                    )
+                except Exception:
+                    N_ph = 0
+
+                # Apply atmospheric transmission
+                zenith_angle = np.arccos(dir_cosine)
+                transmission = cherenkov_transmission(decay_altitude, zenith_angle)
+                N_ph *= transmission
+
+                N_ph_total += N_ph
+
+            photon_counts[idx] = N_ph_total
+
+        else:
+            # Old behavior: single muon from MC data
+            mu_dir = mu_dirs[idx]
+
+            if mu_dir[2] <= 0:
+                continue
+
+            r_rel = decay_pos - sat_position
+            p_hat = mu_dir
+
+            E_mu_daughter = mu_energy[idx]
+            track_length = muon_range_in_air(
+                E_mu_daughter, decay_altitude,
+                direction_cosine=max(p_hat[2], 0.1)
+            )
+
+            N_track = min(1000, max(300, int(track_length / 100)))
+            try:
+                N_ph, _, _ = cherenkov_photons_detected_vectorized(
+                    r_rel, p_hat, track_length, R_det, N_psi=300, N_track=N_track
+                )
+            except Exception:
+                N_ph = 0
+
+            # Apply atmospheric transmission
+            zenith_angle = np.arccos(max(p_hat[2], 0.1))
+            transmission = cherenkov_transmission(decay_altitude, zenith_angle)
+            N_ph *= transmission
+
+            photon_counts[idx] = N_ph
 
     return photon_counts, N_HNLs_per_muon

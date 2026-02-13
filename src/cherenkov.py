@@ -8,6 +8,82 @@ LAMBDA_MIN = 300e-9  # minimum wavelength in meters
 LAMBDA_MAX = 1000e-9  # maximum wavelength in meters
 
 
+def cherenkov_transmission(altitude_m, zenith_angle_rad, lambda_min=LAMBDA_MIN, lambda_max=LAMBDA_MAX):
+    """
+    Compute the atmospheric transmission factor for Cherenkov photons
+    traveling from emission altitude upward through the atmosphere.
+
+    Accounts for Rayleigh scattering (molecular) and Mie scattering (aerosol).
+    Returns a multiplicative factor in [0, 1] to apply to the raw photon count.
+
+    Parameters
+    ----------
+    altitude_m : float or array
+        Altitude of photon emission [m]
+    zenith_angle_rad : float or array
+        Zenith angle of photon propagation direction [rad].
+        0 = straight up, pi/2 = horizontal.
+    lambda_min : float
+        Minimum wavelength [m] (default 300 nm)
+    lambda_max : float
+        Maximum wavelength [m] (default 1000 nm)
+
+    Returns
+    -------
+    transmission : float or array
+        Fraction of photons surviving atmospheric scattering (0 to 1)
+    """
+    altitude_m = np.asarray(altitude_m, dtype=float)
+    zenith_angle_rad = np.asarray(zenith_angle_rad, dtype=float)
+
+    # Atmosphere parameters
+    H_R = 8500.0    # Rayleigh scale height [m]
+    H_M = 1200.0    # Mie (aerosol) scale height [m]
+
+    # Vertical optical depths from sea level to infinity (at reference wavelength 400 nm)
+    # Rayleigh: tau_R ~ 0.36 at 400 nm at sea level
+    # Mie: tau_M ~ 0.12 at 400 nm at sea level (clear atmosphere)
+    tau_R_0_ref = 0.36   # Rayleigh optical depth at 400 nm, sea level to infinity
+    tau_M_0_ref = 0.12   # Mie optical depth at 400 nm, sea level to infinity
+    lambda_ref = 400e-9  # reference wavelength [m]
+
+    # Band-averaged effective wavelength for Cherenkov spectrum (dN/dlambda ~ 1/lambda^2)
+    # <1/lambda^4> for Rayleigh, <1/lambda^1.2> for Mie, weighted by 1/lambda^2 spectrum
+    # Effective wavelength for Rayleigh: integral of lambda^-6 / integral of lambda^-2
+    # Compute band-averaged scaling factors
+    def _band_avg_power(n_power, lmin, lmax):
+        """Compute <lambda^n> weighted by Cherenkov spectrum (1/lambda^2)."""
+        # weight ~ 1/lambda^2, so <lambda^n> = integral(lambda^(n-2)) / integral(lambda^(-2))
+        if n_power - 2 + 1 == 0:  # n_power = 1
+            num = np.log(lmax / lmin)
+        else:
+            num = (lmax**(n_power - 1) - lmin**(n_power - 1)) / (n_power - 1)
+        denom = (1.0 / lmin - 1.0 / lmax)
+        return num / denom
+
+    # Rayleigh: tau ~ lambda^(-4)
+    rayleigh_factor = _band_avg_power(-4, lambda_min, lambda_max) * lambda_ref**4
+    # Mie: tau ~ lambda^(-1.2) (Angstrom exponent ~1.2 for typical aerosol)
+    mie_factor = _band_avg_power(-1.2, lambda_min, lambda_max) * lambda_ref**1.2
+
+    # Optical depth from altitude z to infinity (vertical)
+    # tau_R(z) = tau_R_0 * exp(-z / H_R)
+    # tau_M(z) = tau_M_0 * exp(-z / H_M)
+    tau_R_vertical = tau_R_0_ref * rayleigh_factor * np.exp(-altitude_m / H_R)
+    tau_M_vertical = tau_M_0_ref * mie_factor * np.exp(-altitude_m / H_M)
+
+    # Slant path correction: for upward-going photons at zenith angle theta,
+    # the column depth is multiplied by 1/cos(theta) (plane-parallel approximation,
+    # valid for zenith_angle < ~75 deg)
+    cos_zen = np.cos(zenith_angle_rad)
+    cos_zen = np.maximum(cos_zen, 0.1)  # prevent divergence near horizon
+
+    tau_total = (tau_R_vertical + tau_M_vertical) / cos_zen
+
+    transmission = np.exp(-tau_total)
+    return transmission
+
+
 def get_cherenkov_angle(n=N_AIR):
     """Return the Cherenkov angle for a relativistic particle in medium with index n."""
     return np.arccos(1.0 / n)

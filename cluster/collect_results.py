@@ -35,6 +35,7 @@ def load_raw_results(scan_dir="data/scan_results"):
 
     photon_counts = {}
     N_HNLs_per_muon = {}
+    cherenkov_weights = {}
     n_missing = 0
 
     missing_array_ids = []
@@ -42,6 +43,7 @@ def load_raw_results(scan_dir="data/scan_results"):
     for i_m,m_N in enumerate(MASSES):
         ph_all = np.zeros((len(U2_RANGE), N_samples))
         nhnl_all = np.zeros(len(U2_RANGE))
+        weights_all = np.ones(len(U2_RANGE))
         mass_complete = True
 
         for i_b,b in enumerate(range(N_U2_BATCHES)):
@@ -59,20 +61,23 @@ def load_raw_results(scan_dir="data/scan_results"):
             u2_end = int(data["u2_end"])
             ph_all[u2_start:u2_end] = data["photon_counts"]
             nhnl_all[u2_start:u2_end] = data["N_HNLs_per_muon"]
+            if "cherenkov_weights" in data:
+                weights_all[u2_start:u2_end] = data["cherenkov_weights"]
 
         photon_counts[m_N] = ph_all
         N_HNLs_per_muon[m_N] = nhnl_all
+        cherenkov_weights[m_N] = weights_all
 
     if n_missing > 0:
         print(f"  {n_missing} batch files missing out of {len(MASSES) * N_U2_BATCHES}")
         print("To re-run missing batches, use: sbatch cluster/submit_scan.sh --array=")
         print("  " + ",".join(f"{i}" for i in missing_array_ids))
 
-    return photon_counts, N_HNLs_per_muon, U2_RANGE, N_samples
+    return photon_counts, N_HNLs_per_muon, cherenkov_weights, U2_RANGE, N_samples
 
 
-def apply_threshold(photon_counts, N_HNLs_per_muon, U2_range, N_samples,
-                    min_photons=5):
+def apply_threshold(photon_counts, N_HNLs_per_muon, cherenkov_weights,
+                    U2_range, N_samples, min_photons=5):
     """Derive events/efficiency/mean_photons for a given threshold."""
     available_masses = sorted(photon_counts.keys())
     n_m = len(available_masses)
@@ -85,8 +90,9 @@ def apply_threshold(photon_counts, N_HNLs_per_muon, U2_range, N_samples,
     for im, m_N in enumerate(available_masses):
         for iU2 in range(n_U2):
             ph = photon_counts[m_N][iU2]
+            w = cherenkov_weights[m_N][iU2]
             detected = ph >= min_photons
-            eff = np.sum(detected) / N_samples
+            eff = np.sum(detected) * w / N_samples
             mph = np.mean(ph[detected]) if np.any(detected) else 0.0
             n_ev = N_HNLs_per_muon[m_N][iU2] * eff * N_muon_decays
 
@@ -110,11 +116,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Loading raw results...")
-    ph_counts, n_hnl, U2_range, N_samples = load_raw_results()
+    ph_counts, n_hnl, ch_weights, U2_range, N_samples = load_raw_results()
     print(f"  Loaded {len(ph_counts)} masses, {len(U2_range)} U2 points, N_samples={N_samples}")
 
     print(f"Applying threshold min_photons={args.min_photons}...")
-    results = apply_threshold(ph_counts, n_hnl, U2_range, N_samples,
+    results = apply_threshold(ph_counts, n_hnl, ch_weights, U2_range, N_samples,
                               min_photons=args.min_photons)
 
     np.savez(args.output, **results)

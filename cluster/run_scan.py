@@ -29,6 +29,7 @@ U2_RANGE = np.logspace(-14, -7, 100)
 U2_BATCH_SIZE = 5
 N_SAMPLES = 1000000
 E_MU = 5000  # GeV
+MAX_CHERENKOV = 50000  # cap Cherenkov evaluations per point for uniform runtimes
 
 # Geometry
 TARGET_DEPTH = 200      # m
@@ -70,20 +71,24 @@ os.makedirs(outdir, exist_ok=True)
 # --- Run batch ---
 photon_counts_batch = np.zeros((len(U2_batch), N_SAMPLES))
 N_HNLs_per_muon_batch = np.zeros(len(U2_batch))
+cherenkov_weights_batch = np.ones(len(U2_batch))
 
 for i, U2 in enumerate(U2_batch):
     t1 = time.time()
     try:
-        ph_counts, n_hnl = compute_signal_at_satellite(
-            m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES
+        ph_counts, n_hnl, ch_weight = compute_signal_at_satellite(
+            m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
+            use_energy_loss=True, use_all_channels=False,
+            max_cherenkov_events=MAX_CHERENKOV
         )
         photon_counts_batch[i] = ph_counts
         N_HNLs_per_muon_batch[i] = n_hnl
+        cherenkov_weights_batch[i] = ch_weight
     except Exception as e:
         print(f"  WARNING: U2={U2:.2e} failed: {e}")
 
     dt = time.time() - t1
-    print(f"  U2={U2:.2e} ({i+1}/{len(U2_batch)}): {dt:.1f}s")
+    print(f"  U2={U2:.2e} ({i+1}/{len(U2_batch)}): {dt:.1f}s, weight={cherenkov_weights_batch[i]:.2f}")
     sys.stdout.flush()
 
 # --- Save results ---
@@ -96,7 +101,8 @@ np.savez(outfile,
          U2_range_full=U2_RANGE,
          N_samples=N_SAMPLES,
          photon_counts=photon_counts_batch,
-         N_HNLs_per_muon=N_HNLs_per_muon_batch)
+         N_HNLs_per_muon=N_HNLs_per_muon_batch,
+         cherenkov_weights=cherenkov_weights_batch)
 
 print(f"Done! Saved to {outfile}")
 print(f"Total time: {time.time()-t0:.1f}s")

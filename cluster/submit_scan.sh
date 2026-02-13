@@ -2,7 +2,7 @@
 #SBATCH --job-name=hnl_balloon
 #SBATCH --partition=serial_requeue,shared,sapphire
 #SBATCH --array=0-279
-#SBATCH --time=0-5:00:00
+#SBATCH --time=0-3:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=8
 #SBATCH --output=cluster/logs/scan_%a.out

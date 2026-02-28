@@ -56,3 +56,10 @@ data/HNL_kinematics
 Figures
 cluster/logs
 data/scan_results*
+data/scan_results
+
+notes/*.aux
+notes/*.log
+notes/*.out
+notes/*.pdf
+notes/*.toc

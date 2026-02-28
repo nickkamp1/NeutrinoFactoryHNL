@@ -14,6 +14,11 @@ PION_INTERACTION_LENGTH_GCM2 = 120.0   # nuclear interaction length in air [g/cm
 RADIATION_LENGTH_AIR_GCM2 = 36.62      # radiation length in air [g/cm²]
 E_CRITICAL_AIR = 0.080                  # critical energy for EM showers in air [GeV]
 
+HNL_MC = {}
+for mass in [5,6,7,8,9,10,20,30,40,50,60,70,80,90,95,96]:
+    filename = "data/HNL_kinematics/Momentum%2.1f.dat" % mass
+    HNL_MC[mass] = pd.read_csv(filename, sep=r'\s+')
+
 def air_density(altitude_m):
     """
     Approximate air density as function of altitude using exponential atmosphere.
@@ -395,9 +400,9 @@ class HNLFluxGeometry:
         self.hnl_mc = {}
         self.available_masses = []
         for mass in [5,6,7,8,9,10,20,30,40,50,60,70,80,90,95,96]:
-            filename = "data/HNL_kinematics/Momentum%2.1f.dat" % mass
-            self.hnl_mc[mass] = pd.read_csv(filename, sep=r'\s+')
-            self.available_masses.append(mass)
+            if mass in HNL_MC:
+                self.hnl_mc[mass] = HNL_MC[mass]
+                self.available_masses.append(mass)
         self.available_masses = np.array(self.available_masses)
 
     def _nearest_mc_mass(self, m_N):
@@ -607,7 +612,8 @@ class HNLFluxGeometry:
         return self.satellite_pos.copy()
 
 
-def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10):
+def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10,
+                     cherenkov_weight=1.0):
     """
     Apply a photon threshold to raw simulation output and compute signal summary.
 
@@ -621,6 +627,8 @@ def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10):
         Total number of MC samples used in the simulation.
     min_photons : float
         Minimum photon count for detection.
+    cherenkov_weight : float
+        Reweight factor from subsampled Cherenkov evaluation (default 1.0).
 
     Returns
     -------
@@ -629,7 +637,7 @@ def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10):
     number_of_events : float
     """
     detected = photon_counts >= min_photons
-    detection_efficiency = np.sum(detected) / N_samples
+    detection_efficiency = np.sum(detected) * cherenkov_weight / N_samples
     mean_photons = np.mean(photon_counts[detected]) if np.any(detected) else 0.0
     number_of_events = N_HNLs_per_muon * detection_efficiency * N_muon_decays
     return detection_efficiency, mean_photons, number_of_events
@@ -687,7 +695,8 @@ def sensitivity_criterion(S, B, method='gaussian', CL=0.95):
 
 def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
                            N_samples, U2_arr, N_background,
-                           min_photons=10, method='gaussian', CL=0.95):
+                           min_photons=10, method='gaussian', CL=0.95,
+                           cherenkov_weights=None):
     """
     Find the sensitivity limit U2 for a given HNL mass from a pre-computed scan.
 
@@ -712,6 +721,8 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
         Sensitivity method ('gaussian', 'poisson').
     CL : float
         Confidence level.
+    cherenkov_weights : array or None
+        Reweight factors per U2 point (default None = all 1.0).
 
     Returns
     -------
@@ -719,8 +730,10 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
         The smallest U2 that passes the sensitivity criterion, or None.
     """
     for i, U2 in enumerate(U2_arr):
+        w = cherenkov_weights[i] if cherenkov_weights is not None else 1.0
         _, _, S = summarize_signal(
-            photon_counts_grid[i], N_HNLs_per_muon_grid[i], N_samples, min_photons
+            photon_counts_grid[i], N_HNLs_per_muon_grid[i], N_samples,
+            min_photons, cherenkov_weight=w
         )
         is_sensitive, _ = sensitivity_criterion(S, N_background, method=method, CL=CL)
         if is_sensitive:
@@ -731,7 +744,8 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
 
 def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
                                 N_samples=1000, use_energy_loss=True,
-                                use_all_channels=True, Umu2=None, Ue2=0.0):
+                                use_all_channels=True, Umu2=None, Ue2=0.0,
+                                max_cherenkov_events=None):
     """
     Compute expected signal at a satellite position from HNL decays.
 
@@ -760,6 +774,11 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
         Muon mixing parameter. If None, assumes Umu2 = U2 (pure muon mixing).
     Ue2 : float
         Electron mixing parameter (default 0).
+    max_cherenkov_events : int or None
+        If set, cap the number of valid-decay events that go through the
+        expensive Cherenkov calculation. The returned cherenkov_weight
+        compensates for the subsampling. Use this to keep job runtimes
+        uniform across parameter space. None means no cap.
 
     Returns
     -------
@@ -767,6 +786,9 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
         Photon count per MC sample (length N_samples).
     N_HNLs_per_muon : float
         Number of HNLs produced per muon.
+    cherenkov_weight : float
+        Reweight factor for subsampled Cherenkov evaluation. Equals 1.0
+        when all valid events are evaluated, > 1.0 when capped.
     """
     if Umu2 is None:
         Umu2 = U2
@@ -799,13 +821,22 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     valid_decay = above_surface & below_satellite
 
     if not np.any(valid_decay):
-        return np.zeros(N_samples), N_HNLs_per_muon
+        return np.zeros(N_samples), N_HNLs_per_muon, 1.0
 
     # For valid decays, compute Cherenkov photons
     photon_counts = np.zeros(N_samples)
     valid_indices = np.where(valid_decay)[0]
+    N_valid = len(valid_indices)
 
-    for idx in valid_indices:
+    # Subsample valid events if there are too many for the Cherenkov loop
+    if max_cherenkov_events is not None and N_valid > max_cherenkov_events:
+        eval_indices = np.random.choice(valid_indices, max_cherenkov_events, replace=False)
+        cherenkov_weight = N_valid / max_cherenkov_events
+    else:
+        eval_indices = valid_indices
+        cherenkov_weight = 1.0
+
+    for idx in eval_indices:
         decay_pos = decay_points[idx]
         decay_altitude = max(0, decay_pos[2])
 
@@ -883,4 +914,4 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
             photon_counts[idx] = N_ph
 
-    return photon_counts, N_HNLs_per_muon
+    return photon_counts, N_HNLs_per_muon, cherenkov_weight

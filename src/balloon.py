@@ -230,6 +230,40 @@ def particle_track_length(particle_type, energy_GeV, altitude_m, direction_cosin
         return 0.0
 
 
+def position_resolution(event_pos, balloon_pos, delta_theta=0.2*np.pi/180,
+                        baseline=20e3):
+    """
+    Stereo position resolution for a two-balloon system.
+
+    Transverse resolution (perpendicular to line of sight) is set by the
+    pixel angular resolution.  Longitudinal resolution (along line of sight)
+    requires stereo parallax from two cameras separated by baseline B.
+
+    Parameters
+    ----------
+    event_pos : array, shape (3,) or (N, 3)
+        Event position(s) [m]
+    balloon_pos : array, shape (3,)
+        Position of the nearer balloon [m]
+    delta_theta : float
+        Angular resolution per pixel [rad] (default 0.2 deg)
+    baseline : float
+        Stereo baseline between two balloons [m] (default 20 km)
+
+    Returns
+    -------
+    sigma_perp : float or array
+        Transverse position resolution [m]
+    sigma_par : float or array
+        Longitudinal (along line of sight) position resolution [m]
+    """
+    diff = np.asarray(event_pos) - np.asarray(balloon_pos)
+    D = np.linalg.norm(diff, axis=-1)
+    sigma_perp = D * delta_theta
+    sigma_par = D**2 * delta_theta / baseline
+    return sigma_perp, sigma_par
+
+
 def muon_energy_from_hnl_decay(m_N, E_N):
     """
     Estimate muon energy from HNL decay N -> mu + X.
@@ -613,14 +647,20 @@ class HNLFluxGeometry:
 
 
 def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10,
-                     cherenkov_weight=1.0):
+                     cherenkov_weight=1.0, decay_weights=None):
     """
     Apply a photon threshold to raw simulation output and compute signal summary.
+
+    When decay_weights are provided (from the truncated-exponential sampling),
+    the expected event count is:
+        N = N_HNLs_per_muon * N_muon_decays * <w_decay * 1(N_ph >= thr)>_MC
+    This parallels the P_CC weighting in summarize_background().
 
     Parameters
     ----------
     photon_counts : array
-        Photon counts for valid-decay events (from compute_signal_at_satellite).
+        Photon counts from compute_signal_at_satellite.
+        Shape (N_samples,) for single detector or (N_det, N_samples).
     N_HNLs_per_muon : float
         HNL production rate per muon (from compute_signal_at_satellite).
     N_samples : int
@@ -629,16 +669,46 @@ def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10,
         Minimum photon count for detection.
     cherenkov_weight : float
         Reweight factor from subsampled Cherenkov evaluation (default 1.0).
+    decay_weights : array, shape (N_samples,), or None
+        Per-event decay probability weight. If None, uses the old
+        unweighted counting (backward compatible).
 
     Returns
     -------
-    detection_efficiency : float
-    mean_photons : float
-    number_of_events : float
+    detection_efficiency : float or array
+    mean_photons : float or array
+    number_of_events : float or array
+        If photon_counts is 2D, returns arrays of length N_det.
     """
+    photon_counts = np.asarray(photon_counts)
+
+    # Handle multi-detector case: recurse over detectors
+    if photon_counts.ndim == 2:
+        results = [summarize_signal(photon_counts[i], N_HNLs_per_muon,
+                                    N_samples, min_photons, cherenkov_weight,
+                                    decay_weights)
+                   for i in range(photon_counts.shape[0])]
+        return (np.array([r[0] for r in results]),
+                np.array([r[1] for r in results]),
+                np.array([r[2] for r in results]))
+
+    # Single-detector case
     detected = photon_counts >= min_photons
-    detection_efficiency = np.sum(detected) * cherenkov_weight / N_samples
-    mean_photons = np.mean(photon_counts[detected]) if np.any(detected) else 0.0
+
+    if decay_weights is not None:
+        # Weighted by decay probability (parallels P_CC in background)
+        weighted_sum = np.sum(decay_weights[detected]) * cherenkov_weight
+        detection_efficiency = weighted_sum / N_samples
+        if np.any(detected):
+            mean_photons = np.average(photon_counts[detected],
+                                      weights=decay_weights[detected])
+        else:
+            mean_photons = 0.0
+    else:
+        # Old unweighted counting (backward compatible)
+        detection_efficiency = np.sum(detected) * cherenkov_weight / N_samples
+        mean_photons = np.mean(photon_counts[detected]) if np.any(detected) else 0.0
+
     number_of_events = N_HNLs_per_muon * detection_efficiency * N_muon_decays
     return detection_efficiency, mean_photons, number_of_events
 
@@ -745,9 +815,15 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
 def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
                                 N_samples=1000, use_energy_loss=True,
                                 use_all_channels=True, Umu2=None, Ue2=0.0,
-                                max_cherenkov_events=None):
+                                max_cherenkov_events=None,
+                                detector_positions=None):
     """
-    Compute expected signal at a satellite position from HNL decays.
+    Compute expected signal at one or more detector positions from HNL decays.
+
+    Each HNL is simulated out to d_max (distance to the highest detector)
+    and assigned a decay_weight = 1 - exp(-d_max / L_decay), the probability
+    to decay within the observable volume.  This parallels the P_CC weighting
+    used for the neutrino background.
 
     Returns raw photon counts and production rate so that different
     photon thresholds can be applied after the fact via summarize_signal().
@@ -779,21 +855,33 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
         expensive Cherenkov calculation. The returned cherenkov_weight
         compensates for the subsampling. Use this to keep job runtimes
         uniform across parameter space. None means no cap.
+    detector_positions : list of array-like or None
+        List of 3D detector positions [m]. If None, uses the single
+        position from flux_geometry.get_satellite_position().
 
     Returns
     -------
     photon_counts : ndarray
-        Photon count per MC sample (length N_samples).
+        Photon count per MC sample. Shape (N_samples,) for single detector,
+        or (N_det, N_samples) for multiple detectors.
     N_HNLs_per_muon : float
         Number of HNLs produced per muon.
     cherenkov_weight : float
         Reweight factor for subsampled Cherenkov evaluation. Equals 1.0
         when all valid events are evaluated, > 1.0 when capped.
+    decay_weights : ndarray, shape (N_samples,)
+        Per-event decay probability weight = 1 - exp(-d_max / L_decay).
     """
     if Umu2 is None:
         Umu2 = U2
 
-    sat_position = flux_geometry.get_satellite_position()
+    # Set up detector positions
+    single_detector = detector_positions is None
+    if single_detector:
+        detector_positions = [flux_geometry.get_satellite_position()]
+    detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
+    N_det = len(detector_positions)
+    max_det_height = max(p[2] for p in detector_positions)
 
     if use_energy_loss:
         # Use energy-loss-weighted production
@@ -807,24 +895,54 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
     hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(m_N, N_samples)
 
-    # HNL decay length
+    # HNL decay length (per event)
     decay_length = HNL_decay_length(m_N, U2, hnl_energy)
 
-    # Sample decay points
-    decay_points, travel_dist = flux_geometry.sample_decay_points(
-        prod_points, hnl_dirs, decay_length
-    )
+    # --- Decay probability weighting ---
+    # For each HNL, compute d_max = distance along its direction to z = max_det_height
+    # d_max = (max_det_height - z_prod) / cos(theta_z), where cos(theta_z) = hnl_dirs[:, 2]
+    dz_to_max = max_det_height - prod_points[:, 2]  # vertical distance to max height
+    cos_z = hnl_dirs[:, 2]
 
-    # Filter: decays in atmosphere (z > 0 and z < satellite altitude)
+    # Only upward-going HNLs can reach the detectors
+    upward = cos_z > 0
+    d_max = np.where(upward, dz_to_max / cos_z, 0.0)
+    d_max = np.maximum(d_max, 0.0)
+
+    # Decay weight = probability to decay within [0, d_max]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        decay_weights = np.where(
+            d_max > 0,
+            1.0 - np.exp(-d_max / decay_length),
+            0.0
+        )
+
+    # Sample decay distance from truncated exponential on [0, d_max]
+    # d = -L * ln(1 - u * (1 - exp(-d_max / L)))
+    u = np.random.uniform(0, 1, N_samples)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        exp_term = np.exp(-d_max / decay_length)
+        decay_dist = np.where(
+            decay_weights > 0,
+            -decay_length * np.log(1.0 - u * (1.0 - exp_term)),
+            0.0
+        )
+
+    # Compute decay points
+    decay_points = prod_points + decay_dist[:, np.newaxis] * hnl_dirs
+
+    # Filter: decays above surface
     above_surface = decay_points[:, 2] > 0
-    below_satellite = decay_points[:, 2] < sat_position[2]
-    valid_decay = above_surface & below_satellite
+    valid_decay = above_surface & (decay_weights > 0)
 
     if not np.any(valid_decay):
-        return np.zeros(N_samples), N_HNLs_per_muon, 1.0
+        photon_counts = np.zeros((N_det, N_samples))
+        if single_detector:
+            return photon_counts[0], N_HNLs_per_muon, 1.0, decay_weights
+        return photon_counts, N_HNLs_per_muon, 1.0, decay_weights
 
-    # For valid decays, compute Cherenkov photons
-    photon_counts = np.zeros(N_samples)
+    # For valid decays, compute Cherenkov photons at each detector
+    photon_counts = np.zeros((N_det, N_samples))
     valid_indices = np.where(valid_decay)[0]
     N_valid = len(valid_indices)
 
@@ -849,39 +967,44 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
             if not daughters:
                 continue
 
-            N_ph_total = 0.0
-            for ptype, E_daughter, p_hat_daughter in daughters:
-                # Skip downward-going particles
-                if p_hat_daughter[2] <= 0:
+            for i_det, det_pos in enumerate(detector_positions):
+                # Only count if decay is below this detector
+                if decay_pos[2] >= det_pos[2]:
                     continue
 
-                r_rel = decay_pos - sat_position
-                dir_cosine = max(p_hat_daughter[2], 0.1)
+                N_ph_total = 0.0
+                for ptype, E_daughter, p_hat_daughter in daughters:
+                    # Skip downward-going particles
+                    if p_hat_daughter[2] <= 0:
+                        continue
 
-                track_length = particle_track_length(
-                    ptype, E_daughter, decay_altitude, dir_cosine
-                )
+                    r_rel = decay_pos - det_pos
+                    dir_cosine = max(p_hat_daughter[2], 0.1)
 
-                if track_length <= 0:
-                    continue
-
-                N_track = min(1000, max(100, int(track_length / 100)))
-                try:
-                    N_ph, _, _ = cherenkov_photons_detected_vectorized(
-                        r_rel, p_hat_daughter, track_length, R_det,
-                        N_psi=300, N_track=N_track
+                    track_length = particle_track_length(
+                        ptype, E_daughter, decay_altitude, dir_cosine
                     )
-                except Exception:
-                    N_ph = 0
 
-                # Apply atmospheric transmission
-                zenith_angle = np.arccos(dir_cosine)
-                transmission = cherenkov_transmission(decay_altitude, zenith_angle)
-                N_ph *= transmission
+                    if track_length <= 0:
+                        continue
 
-                N_ph_total += N_ph
+                    N_track = min(1000, max(100, int(track_length / 100)))
+                    try:
+                        N_ph, _, _ = cherenkov_photons_detected_vectorized(
+                            r_rel, p_hat_daughter, track_length, R_det,
+                            N_psi=300, N_track=N_track
+                        )
+                    except Exception:
+                        N_ph = 0
 
-            photon_counts[idx] = N_ph_total
+                    # Apply atmospheric transmission
+                    zenith_angle = np.arccos(dir_cosine)
+                    transmission = cherenkov_transmission(decay_altitude, zenith_angle)
+                    N_ph *= transmission
+
+                    N_ph_total += N_ph
+
+                photon_counts[i_det, idx] = N_ph_total
 
         else:
             # Old behavior: single muon from MC data
@@ -890,28 +1013,34 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
             if mu_dir[2] <= 0:
                 continue
 
-            r_rel = decay_pos - sat_position
-            p_hat = mu_dir
+            for i_det, det_pos in enumerate(detector_positions):
+                if decay_pos[2] >= det_pos[2]:
+                    continue
 
-            E_mu_daughter = mu_energy[idx]
-            track_length = muon_range_in_air(
-                E_mu_daughter, decay_altitude,
-                direction_cosine=max(p_hat[2], 0.1)
-            )
+                r_rel = decay_pos - det_pos
+                p_hat = mu_dir
 
-            N_track = min(1000, max(300, int(track_length / 100)))
-            try:
-                N_ph, _, _ = cherenkov_photons_detected_vectorized(
-                    r_rel, p_hat, track_length, R_det, N_psi=300, N_track=N_track
+                E_mu_daughter = mu_energy[idx]
+                track_length = muon_range_in_air(
+                    E_mu_daughter, decay_altitude,
+                    direction_cosine=max(p_hat[2], 0.1)
                 )
-            except Exception:
-                N_ph = 0
 
-            # Apply atmospheric transmission
-            zenith_angle = np.arccos(max(p_hat[2], 0.1))
-            transmission = cherenkov_transmission(decay_altitude, zenith_angle)
-            N_ph *= transmission
+                N_track = min(1000, max(300, int(track_length / 100)))
+                try:
+                    N_ph, _, _ = cherenkov_photons_detected_vectorized(
+                        r_rel, p_hat, track_length, R_det, N_psi=300, N_track=N_track
+                    )
+                except Exception:
+                    N_ph = 0
 
-            photon_counts[idx] = N_ph
+                # Apply atmospheric transmission
+                zenith_angle = np.arccos(max(p_hat[2], 0.1))
+                transmission = cherenkov_transmission(decay_altitude, zenith_angle)
+                N_ph *= transmission
 
-    return photon_counts, N_HNLs_per_muon, cherenkov_weight
+                photon_counts[i_det, idx] = N_ph
+
+    if single_detector:
+        return photon_counts[0], N_HNLs_per_muon, cherenkov_weight, decay_weights
+    return photon_counts, N_HNLs_per_muon, cherenkov_weight, decay_weights

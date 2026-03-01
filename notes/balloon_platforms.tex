@@ -486,6 +486,25 @@ to decay near the balloon.  Conversely, very long-lived HNLs decay over
 the full 250~km path, with decays uniformly distributed along the
 trajectory.
 
+Figure~\ref{fig:dump_geometry} shows the available decay region length
+as a function of the muon dump length for several dump depths, with
+the band in each case spanning balloon heights from 1 to 5~km.
+Shallow dumps ($\lesssim$10~m) can access the full $\sim$250~km
+baseline even with short muon dump lengths, while deeper dumps
+require proportionally longer muon ranges before the beam clears
+the surface.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.75\textwidth]{../Figures/balloon/dump_decay_geometry.png}
+\caption{Decay region length vs.\ muon dump length for four dump
+depths (10, 50, 100, 200~m).  The shaded bands span balloon
+heights from 1 to 5~km.  The upper boundary of each band
+($h_{\text{balloon}} = 5$~km) saturates at $\sim$250~km,
+set by Earth's curvature via Eq.~\eqref{eq:curvature}.}
+\label{fig:dump_geometry}
+\end{figure}
+
 \subsection{Atmospheric Considerations}
 
 The horizontal geometry introduces additional atmospheric effects.
@@ -646,6 +665,120 @@ for this experiment:
         batteries or solar panels simplifies the instrument and
         reduces mass, potentially enabling a smaller aerostat.
 \end{enumerate}
+
+
+%======================================================================
+\section{Background Discrimination Strategy}
+\label{sec:discrimination}
+%======================================================================
+
+The dominant background is neutrino-induced: beam neutrinos from the
+same DIS process ($\mu + N \to \nu_\mu + X$) interact in the atmosphere
+via charged-current scattering ($\nu_\mu + N \to \mu + X$), producing
+muons whose Cherenkov light mimics the HNL signal.  Both signal and
+background produce forward-going charged particles with hadronic
+activity; at the current level of analysis we treat both as single
+Cherenkov tracks weighted by detection probability.
+
+The key physical difference is the \emph{altitude distribution}:
+\begin{itemize}[nosep]
+  \item \textbf{Background}: The neutrino interaction probability is
+        $\propto \rho_{\text{air}}(z) \propto e^{-z/H}$ with scale
+        height $H \approx 8.5$~km.  Background events are concentrated
+        near the surface.
+  \item \textbf{Signal}: HNL decays follow
+        $\propto e^{-\ell/L_{\text{decay}}}$ along the beam direction.
+        For long-lived HNLs ($L_{\text{decay}} \gg H$), the signal
+        altitude distribution is much flatter than the background.
+\end{itemize}
+
+We consider three complementary discrimination strategies, implemented
+in a two-balloon configuration.
+
+
+\subsection{Rate Ratio (Two Heights)}
+
+The simplest approach: two balloons at different altitudes
+(e.g.\ $h_1 = 2$~km and $h_2 = 5$~km), both at the same downrange
+position.  Measure the event rate at each balloon and form the ratio
+$R = N(h_1) / N(h_2)$.  The background ratio is fixed by the
+atmospheric density profile and is independent of the beam parameters.
+The signal ratio depends on $L_{\text{decay}}$ and differs from the
+background ratio whenever $L_{\text{decay}} \neq H$.
+
+
+\subsection{Pixel-Level Spatial Distributions}
+
+Each Cherenkov camera has 2048 pixels at $0.2^\circ$/pixel, covering a
+$12.8^\circ$ field of view.  Pointed along the beam direction, different
+pixels map to different elevation angles and thus different event
+altitudes.  Even a \emph{single} camera provides a 2D spatial
+distribution of events on the sky.  A template fit to this distribution
+--- with signal and background templates predicted by simulation ---
+extracts more information than the integrated rate alone.
+
+
+\subsection{Stereo Reconstruction}
+
+Two cameras separated by a horizontal baseline $B$ observe the same
+event at different pixel positions.  The parallax gives the distance to
+the event, enabling full 3D reconstruction.  The position resolution
+depends on the angular resolution $\delta\theta$ per pixel, the
+distance $D$ to the event, and the stereo baseline $B$:
+\begin{align}
+  \sigma_\perp &= D \cdot \delta\theta
+  \label{eq:sigma_perp} \\
+  \sigma_\parallel &= \frac{D^2 \cdot \delta\theta}{B}
+  \label{eq:sigma_par}
+\end{align}
+where $\sigma_\perp$ is the transverse resolution (perpendicular to
+the line of sight) and $\sigma_\parallel$ is the longitudinal
+resolution (along the line of sight).  For $\delta\theta = 0.2^\circ
+\approx 3.5$~mrad and $B = 20$~km:
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+\textbf{Distance $D$} & $\sigma_\perp$ & $\sigma_\parallel$ \\
+\midrule
+10~km  & 35~m   & 18~m \\
+50~km  & 175~m  & 440~m \\
+100~km & 350~m  & 1.75~km \\
+250~km & 875~m  & 11~km \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With stereo reconstruction, each event is localized in 3D space.
+The analysis then becomes a spatial template fit: the signal
+template predicts events along the beam axis with a flat altitude
+distribution, while the background template predicts events
+concentrated at low altitudes following the air density profile.
+
+
+\subsection{Recommended Configuration}
+
+Combining all three handles, we propose a two-balloon system with
+both vertical and horizontal separation:
+\begin{itemize}[nosep]
+  \item \textbf{Balloon A}: altitude $h_A = 5$~km, position
+        $\vec{x}_A$
+  \item \textbf{Balloon B}: altitude $h_B = 2\text{--}3$~km, offset
+        $\sim$15--30~km from Balloon~A (perpendicular to beam axis)
+\end{itemize}
+
+This configuration provides:
+\begin{enumerate}[nosep]
+  \item Rate ratio discrimination from the altitude difference
+  \item Independent pixel-level spatial distributions from each camera
+  \item Stereo 3D reconstruction for events in the overlapping
+        field of view ($B \sim 15\text{--}30$~km baseline)
+\end{enumerate}
+
+The joint analysis uses a template fit to the combined data from both
+cameras --- either as two independent 2D sky maps or as a single
+3D reconstructed event distribution --- with signal and background
+templates from simulation.
 
 
 %======================================================================

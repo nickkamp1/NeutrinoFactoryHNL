@@ -99,30 +99,33 @@ def sample_interaction_altitude(N, z_max_m, z_min_m=0.0):
 
 
 def compute_background_at_satellite(flux_geometry, N_samples=1000,
-                                    max_cherenkov_events=None):
+                                    max_cherenkov_events=None,
+                                    detector_positions=None):
     """
     Compute neutrino background using the same DIS framework as the HNL signal.
 
     Neutrinos produced by μ + N → ν_μ + X (m_N=0, U²=1) interact in the
     atmosphere via CC, producing muons whose Cherenkov light reaches the
-    detector. Each event is weighted by P_CC, the probability that the
+    detector(s). Each event is weighted by P_CC, the probability that the
     neutrino interacts in the atmospheric column.
 
     Parameters
     ----------
-    E_mu : float
-        Muon beam energy [GeV]
     flux_geometry : HNLFluxGeometry
         Geometry configuration (provides production points, MC kinematics, etc.)
     N_samples : int
         Number of MC neutrino events
     max_cherenkov_events : int or None
         Cap on expensive Cherenkov evaluations
+    detector_positions : list of array-like or None
+        List of 3D detector positions [m]. If None, uses the single
+        position from flux_geometry.get_satellite_position().
 
     Returns
     -------
-    photon_counts : ndarray, shape (N_samples,)
-        Cherenkov photons per event (from the CC-produced muon)
+    photon_counts : ndarray
+        Cherenkov photons per event. Shape (N_samples,) for single detector,
+        or (N_det, N_samples) for multiple detectors.
     interaction_weights : ndarray, shape (N_samples,)
         P_CC weight for each event
     N_nu_per_muon : float
@@ -132,8 +135,13 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
     interaction_altitudes : ndarray, shape (N_samples,)
         Sampled interaction altitude for each event [m] (0 if not evaluated)
     """
-    sat_pos = flux_geometry.get_satellite_position()
-    sat_height = sat_pos[2]
+    # Set up detector positions
+    single_detector = detector_positions is None
+    if single_detector:
+        detector_positions = [flux_geometry.get_satellite_position()]
+    detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
+    N_det = len(detector_positions)
+    max_det_height = max(p[2] for p in detector_positions)
 
     # --- 1. Neutrino production rate ---
     # Same as HNL with m_N=0, U²=1: sigma(E_mu, 0, 1) integrated over depth
@@ -154,17 +162,20 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
     going_up = nu_dirs[:, 2] > 0
     upward_indices = np.where(going_up)[0]
 
-    photon_counts = np.zeros(N_samples)
+    photon_counts = np.zeros((N_det, N_samples))
     interaction_weights = np.zeros(N_samples)
     interaction_altitudes = np.zeros(N_samples)
 
     if len(upward_indices) == 0:
+        if single_detector:
+            return photon_counts[0], interaction_weights, N_nu_per_muon, 1.0, interaction_altitudes
         return photon_counts, interaction_weights, N_nu_per_muon, 1.0, interaction_altitudes
 
     # --- 5. Compute P_CC for each upward neutrino ---
+    # Use max detector height for the atmospheric column
     for idx in upward_indices:
         cos_z = nu_dirs[idx, 2]
-        column = atmospheric_column_depth_nucleons(0, sat_height, cos_z)
+        column = atmospheric_column_depth_nucleons(0, max_det_height, cos_z)
         interaction_weights[idx] = sigma_CC_nu(nu_energy[idx]) * column
 
     # --- 6. Sample interaction altitudes and compute Cherenkov ---
@@ -177,7 +188,7 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
         cherenkov_weight = 1.0
 
     # Pre-sample all interaction altitudes at once
-    z_int_all = sample_interaction_altitude(len(eval_indices), z_max_m=sat_height)
+    z_int_all = sample_interaction_altitude(len(eval_indices), z_max_m=max_det_height)
 
     for i_eval, idx in enumerate(eval_indices):
         z_int = z_int_all[i_eval]
@@ -222,30 +233,39 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
         if mu_hat[2] <= 0:
             continue
 
-        # --- Cherenkov from outgoing muon ---
-        r_rel = int_pos - sat_pos
+        # --- Cherenkov from outgoing muon at each detector ---
         dir_cosine = max(mu_hat[2], 0.1)
-
         track_length = muon_range_in_air(E_mu_out, z_int, direction_cosine=dir_cosine)
         if track_length <= 0:
             continue
 
-        N_track = min(1000, max(100, int(track_length / 100)))
-        try:
-            N_ph, _, _ = cherenkov_photons_detected_vectorized(
-                r_rel, mu_hat, track_length, R_det,
-                N_psi=100, N_track=N_track
-            )
-        except Exception:
-            N_ph = 0
-
-        # Atmospheric transmission
+        # Atmospheric transmission (same for all detectors)
         zenith_angle = np.arccos(dir_cosine)
         transmission = cherenkov_transmission(z_int, zenith_angle)
-        N_ph *= transmission
 
-        photon_counts[idx] = N_ph
+        N_track = min(1000, max(100, int(track_length / 100)))
 
+        for i_det, det_pos in enumerate(detector_positions):
+            # Only count if interaction is below this detector
+            if z_int >= det_pos[2]:
+                continue
+
+            r_rel = int_pos - det_pos
+
+            try:
+                N_ph, _, _ = cherenkov_photons_detected_vectorized(
+                    r_rel, mu_hat, track_length, R_det,
+                    N_psi=100, N_track=N_track
+                )
+            except Exception:
+                N_ph = 0
+
+            N_ph *= transmission
+            photon_counts[i_det, idx] = N_ph
+
+    if single_detector:
+        return (photon_counts[0], interaction_weights, N_nu_per_muon,
+                cherenkov_weight, interaction_altitudes)
     return (photon_counts, interaction_weights, N_nu_per_muon,
             cherenkov_weight, interaction_altitudes)
 
@@ -260,8 +280,8 @@ def summarize_background(photon_counts, interaction_weights, N_nu_per_muon,
     Parameters
     ----------
     photon_counts : ndarray
-        Cherenkov photons per MC event
-    interaction_weights : ndarray
+        Cherenkov photons per MC event. Shape (N_samples,) or (N_det, N_samples).
+    interaction_weights : ndarray, shape (N_samples,)
         P_CC weight per event
     N_nu_per_muon : float
         Neutrino production rate per muon
@@ -274,11 +294,23 @@ def summarize_background(photon_counts, interaction_weights, N_nu_per_muon,
 
     Returns
     -------
-    N_background : float
-        Expected background events
-    detection_info : dict
-        Diagnostic information
+    N_background : float or array
+        Expected background events. Array of length N_det if multi-detector.
+    detection_info : dict or list of dict
+        Diagnostic information. List if multi-detector.
     """
+    photon_counts = np.asarray(photon_counts)
+
+    # Handle multi-detector case: recurse over detectors
+    if photon_counts.ndim == 2:
+        results = [summarize_background(photon_counts[i], interaction_weights,
+                                        N_nu_per_muon, N_samples, min_photons,
+                                        cherenkov_weight)
+                   for i in range(photon_counts.shape[0])]
+        return (np.array([r[0] for r in results]),
+                [r[1] for r in results])
+
+    # Single-detector case
     detected = photon_counts >= min_photons
 
     # Weighted detection: sum P_CC over detected events, average over all

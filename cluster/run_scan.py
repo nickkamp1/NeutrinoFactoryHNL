@@ -32,7 +32,8 @@ E_MU = 5000  # GeV
 MAX_CHERENKOV = 50000  # cap Cherenkov evaluations per point for uniform runtimes
 
 # Geometry
-TARGET_DEPTH = 200      # m
+DUMP_DEPTH = 200        # m (depth of beam dump origin below surface)
+DUMP_ANGLE = np.pi / 2  # rad (pi/2 = horizontal beam)
 SATELLITE_HEIGHT = 10000  # m (10 km)
 
 N_MASSES = len(MASSES)
@@ -57,8 +58,8 @@ sys.stdout.flush()
 t0 = time.time()
 flux_geometry = HNLFluxGeometry(
     E_mu=E_MU,
-    beam_offset_angle=0.0,
-    target_depth=TARGET_DEPTH,
+    dump_depth=DUMP_DEPTH,
+    dump_angle=DUMP_ANGLE,
     satellite_height=SATELLITE_HEIGHT,
 )
 print(f"Geometry setup: {time.time()-t0:.1f}s")
@@ -76,9 +77,9 @@ cherenkov_weights_batch = np.ones(len(U2_batch))
 for i, U2 in enumerate(U2_batch):
     t1 = time.time()
     try:
-        ph_counts, n_hnl, ch_weight = compute_signal_at_satellite(
+        ph_counts, decay_wts, n_hnl, ch_weight, _ = compute_signal_at_satellite(
             m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
-            use_energy_loss=True, use_all_channels=False,
+            use_energy_loss=True,
             max_cherenkov_events=MAX_CHERENKOV
         )
         photon_counts_batch[i] = ph_counts

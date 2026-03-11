@@ -1,0 +1,521 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newcommand{\Ec}{E_{\mathrm{c}}}
+\newcommand{\Ehad}{E_{\mathrm{had}}}
+\newcommand{\Emu}{E_{\mu}}
+\newcommand{\EHNL}{E_{N}}
+\newcommand{\fEM}{f_{\mathrm{EM}}}
+\newcommand{\CCH}{C_{\mathrm{Ch}}}
+\newcommand{\Adet}{A_{\mathrm{det}}}
+\newcommand{\Rdet}{R_{\mathrm{det}}}
+\newcommand{\shad}{\sigma_{\mathrm{had}}}
+\newcommand{\thetaC}{\theta_{\mathrm{C}}}
+
+\title{Analytical Hadronic Shower Cherenkov Model\\
+for Balloon HNL Detection}
+\author{N.\ Kamp\thanks{Model implementation assisted by Claude (Anthropic).}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe an analytical model for atmospheric Cherenkov light from
+hadronic showers, developed for a balloon-based search for heavy neutral
+lepton (HNL) decays at a neutrino factory.  The model combines three
+ingredients from the imaging atmospheric Cherenkov telescope (IACT)
+literature: (i)~the calorimetric track-length integral, which gives a
+total Cherenkov photon yield proportional to shower energy and
+independent of altitude; (ii)~an electromagnetic-fraction scaling for
+hadronic showers via the Gaisser parameterization; and (iii)~a Gaussian
+geometric acceptance that exploits the fact that the hadronic angular
+spread ($\shad \sim 10^\circ$) greatly exceeds the Cherenkov angle
+($\thetaC \sim 1.4^\circ$).  The resulting closed-form expression
+replaces a Monte Carlo sub-track simulation, yielding identical physics
+with substantially reduced computation.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Introduction}
+\label{sec:intro}
+%======================================================================
+
+A neutrino factory directs $\sim 10^{22}$ muon decays over a ten-year
+lifetime into a beam dump embedded in the Earth.  Deep-inelastic
+scattering (DIS) of the muon beam, $\mu + N \to N_4 + X$, can produce
+heavy neutral leptons (HNLs) with masses up to tens of GeV.  The HNLs
+traverse the rock unimpeded and decay in the atmosphere; the charged
+products emit Cherenkov light detectable by an elevated camera.
+
+For HNL masses above $\sim 1$~GeV, the dominant decay channel is the
+charged-current mode
+\begin{equation}
+  N_4 \to \mu + \text{hadrons}\,,
+  \label{eq:hnl_decay}
+\end{equation}
+producing a muon and a hadronic system.  Previous versions of the
+simulation modeled only the muon-track Cherenkov emission and either
+ignored the hadronic component or attempted to track individual decay
+channels.  This note documents an analytical model that captures the
+hadronic Cherenkov contribution without per-particle ray-tracing.
+
+The same formalism applies to the neutrino background: CC DIS events
+$\nu_\mu + N \to \mu + X$ in the atmosphere also produce a muon plus a
+hadronic shower, and both components contribute Cherenkov light.
+
+%======================================================================
+\section{Cherenkov Yield from Electromagnetic Showers}
+\label{sec:em_yield}
+%======================================================================
+
+\subsection{Frank--Tamm formula}
+
+A relativistic charged particle ($\beta \approx 1$) traversing a medium
+with refractive index $n$ emits Cherenkov photons at a rate given by the
+Frank--Tamm formula:
+\begin{equation}
+  \frac{dN}{d\ell} \;=\;
+  2\pi\alpha\,\sin^2\!\thetaC
+  \int_{\lambda_{\min}}^{\lambda_{\max}}
+  \frac{d\lambda}{\lambda^2}
+  \;=\;
+  2\pi\alpha\,\sin^2\!\thetaC
+  \left(\frac{1}{\lambda_{\min}} - \frac{1}{\lambda_{\max}}\right),
+  \label{eq:frank_tamm}
+\end{equation}
+where $\alpha = 1/137$ is the fine-structure constant and
+$\thetaC = \arccos(1/n)$ is the Cherenkov angle.  For air at sea level
+($n = 1.0003$), with $\lambda_{\min} = 300$~nm and
+$\lambda_{\max} = 1000$~nm:
+\begin{equation}
+  \sin^2\!\thetaC \;\approx\; 2(n-1) \;=\; 6.0 \times 10^{-4},
+  \qquad
+  \left.\frac{dN}{d\ell}\right|_{\text{sea}}
+  \;\approx\; 64\;\text{photons\,m}^{-1}.
+  \label{eq:dndl_sea}
+\end{equation}
+
+\subsection{Track-length integral}
+
+An electromagnetic (EM) shower of primary energy $E$ develops through
+bremsstrahlung and pair production.  At shower maximum, the number of
+charged particles above the critical energy $\Ec$ is approximately
+$E/\Ec$, and each particle travels roughly one radiation length $X_0$
+before losing energy.  The total Cherenkov-producing track length of all
+shower particles is therefore~\cite{Nerling2006,IceCube2013}
+\begin{equation}
+  T_{\mathrm{total}}(E,z) \;=\;
+  \frac{E}{\Ec}\;\frac{X_0}{\rho(z)}\,,
+  \label{eq:track_length}
+\end{equation}
+where $X_0 = 36.62\;\text{g\,cm}^{-2}$ is the radiation length of air,
+$\Ec = 81$~MeV is the critical energy, and $\rho(z)$ is the air
+density at altitude $z$.  The total number of Cherenkov photons emitted
+by the shower is
+\begin{equation}
+  N_{\gamma}^{\mathrm{EM}}(E) \;=\;
+  T_{\mathrm{total}} \times \frac{dN}{d\ell}(z)
+  \;=\;
+  \frac{E}{\Ec}\;\frac{X_0}{\rho(z)}
+  \times \frac{dN}{d\ell}(z)\,.
+  \label{eq:Nph_em}
+\end{equation}
+
+\subsection{Altitude independence}
+
+The Cherenkov yield per meter scales with density through the refractive
+index:
+\begin{equation}
+  \frac{dN}{d\ell}(z) \;\propto\; \sin^2\!\thetaC(z) \;\propto\;
+  \bigl[n(z) - 1\bigr] \;\propto\; \rho(z)\,.
+\end{equation}
+Since $T_{\mathrm{total}} \propto 1/\rho(z)$ from
+Eq.~\eqref{eq:track_length}, the product is independent of altitude:
+\begin{equation}
+  \boxed{
+  N_{\gamma}^{\mathrm{EM}}(E)
+  \;=\;
+  \frac{E}{\Ec}\;\CCH\,,
+  \qquad
+  \CCH \;\equiv\;
+  \frac{X_0}{\rho_0}
+  \times
+  \left.\frac{dN}{d\ell}\right|_{\text{sea}}\,.
+  }
+  \label{eq:C_CH}
+\end{equation}
+Numerically, with $\rho_0 = 1.225 \times 10^{-3}\;\text{g\,cm}^{-3}$:
+\begin{equation}
+  \frac{X_0}{\rho_0} = 299\;\text{m}\,,
+  \qquad
+  \CCH \approx 299 \times 64 \approx 19{,}200\;\text{photons}\;\text{per}\;(E/\Ec).
+  \label{eq:C_CH_value}
+\end{equation}
+Equivalently, $N_{\gamma}^{\mathrm{EM}} \approx 2.4 \times 10^5 \times
+E\,[\text{GeV}]$ photons are emitted in total by the shower, regardless
+of altitude.  This result is validated by the IceCube Geant4
+study~\cite{IceCube2013}, which found a linear relationship
+$\hat\ell = \alpha\,E$ to precision $10^{-5}$ for EM cascades.
+
+%======================================================================
+\section{Extension to Hadronic Showers}
+\label{sec:hadronic}
+%======================================================================
+
+\subsection{EM-fraction scaling}
+
+A hadronic shower cascades through successive nuclear interactions.  At
+each interaction vertex, roughly one-third of the produced pions are
+neutral ($\pi^0 \to \gamma\gamma$), transferring energy irreversibly
+into the electromagnetic channel.  After $k$ generations, the
+electromagnetic fraction is $1 - (2/3)^k$.  This is well described by
+the Gaisser parameterization~\cite{Gaisser1990,Wigmans2000}:
+\begin{equation}
+  \fEM(E) \;=\;
+  1 - \left(\frac{E}{1\;\text{GeV}}\right)^{-0.14}.
+  \label{eq:f_EM}
+\end{equation}
+The exponent $-0.14 \approx \ln(2/3)/\ln(E_0/E)$ encodes the
+multiplicity growth of the hadronic cascade.  At 5~GeV,
+$\fEM \approx 0.20$; at 50~GeV, $\fEM \approx 0.43$.
+
+The total Cherenkov photon yield from a hadronic shower of energy
+$\Ehad$ is then
+\begin{equation}
+  N_{\gamma}^{\mathrm{had}}(\Ehad)
+  \;=\;
+  \fEM(\Ehad)\;\frac{\Ehad}{\Ec}\;\CCH\,.
+  \label{eq:Nph_had}
+\end{equation}
+
+%======================================================================
+\section{Geometric Acceptance}
+\label{sec:geometry}
+%======================================================================
+
+\subsection{Angular spread of hadronic showers}
+
+The charged particles in a hadronic shower acquire transverse momentum
+from nuclear interactions.  The characteristic transverse momentum is
+$p_T \sim 350$~MeV, giving an angular spread relative to the shower
+axis of order
+\begin{equation}
+  \shad \;\sim\; \frac{p_T}{\Ehad / N_{\mathrm{ch}}}
+  \;\sim\; 10^\circ
+\end{equation}
+for GeV-scale showers, where $N_{\mathrm{ch}}$ is the charged-particle
+multiplicity.  This is much larger than the Cherenkov angle in air:
+\begin{equation}
+  \thetaC \;=\; \arccos(1/n) \;\approx\;
+  \sqrt{2(n-1)} \;\approx\; 1.4^\circ
+  \quad\text{(sea level)}.
+\end{equation}
+
+\subsection{Smearing of the Cherenkov ring}
+
+Each charged particle in the shower emits Cherenkov photons in a thin
+cone of half-angle $\thetaC$ around its direction of motion.  When the
+particle directions are distributed as a Gaussian with width $\shad$
+around the shower axis, and $\shad \gg \thetaC$, the Cherenkov ring
+from each particle is narrow compared to the spread of emission
+directions.  Integrating over all particles and their Cherenkov
+azimuths, the resulting angular distribution of photons relative to the
+shower axis is well approximated by the particle distribution itself:
+\begin{equation}
+  P(\alpha) \;\approx\;
+  \frac{1}{2\pi\,\shad^2}\,
+  \exp\!\left(-\frac{\alpha^2}{2\,\shad^2}\right),
+  \label{eq:P_alpha}
+\end{equation}
+where $\alpha$ is the angle between the shower axis $\hat{d}$ and the
+direction from the shower to the observation point.  This is normalized
+on the sphere in the small-angle limit:
+$\int_0^\infty 2\pi\alpha\, P(\alpha)\,d\alpha = 1$.
+
+\subsection{Detected photon count}
+
+A detector of area $\Adet = \pi\Rdet^2$ at distance $d$ from the
+shower subtends solid angle $\Omega_{\mathrm{det}} = \Adet / d^2$.  If
+the detector is at angle $\alpha$ from the shower axis, the fraction of
+photons intercepted is
+\begin{equation}
+  \Phi(\alpha, d)
+  \;=\;
+  P(\alpha) \times \frac{\Adet}{d^2}
+  \;=\;
+  \frac{\Adet}{2\pi\,\shad^2\,d^2}\,
+  \exp\!\left(-\frac{\alpha^2}{2\,\shad^2}\right).
+  \label{eq:geom}
+\end{equation}
+
+%======================================================================
+\section{Complete Analytical Formula}
+\label{sec:formula}
+%======================================================================
+
+Combining the hadronic yield (Eq.~\ref{eq:Nph_had}), the geometric
+acceptance (Eq.~\ref{eq:geom}), and atmospheric transmission $\mathcal{T}(z,\theta_z)$
+accounting for Rayleigh and Mie scattering along the slant path from
+altitude $z$ to the detector, the number of detected Cherenkov photons
+from a hadronic shower is
+\begin{equation}
+  \boxed{
+  N_{\mathrm{det}}^{\mathrm{had}}
+  \;=\;
+  \fEM(\Ehad)\;\frac{\Ehad}{\Ec}\;\CCH
+  \;\times\;
+  \frac{\Adet}{2\pi\,\shad^2\,d^2}\;
+  e^{-\alpha^2/2\shad^2}
+  \;\times\;
+  \mathcal{T}(z, \theta_z)\,.
+  }
+  \label{eq:master}
+\end{equation}
+The key features of this formula are:
+\begin{itemize}[nosep]
+  \item \textbf{Linear in energy}: $N_{\mathrm{det}} \propto \Ehad$
+    (modulo the slowly-varying $\fEM$).
+  \item \textbf{Altitude-independent yield}: the $\CCH$ constant
+    absorbs all density dependence. The only altitude-dependent factor
+    is the atmospheric transmission $\mathcal{T}$.
+  \item \textbf{Analytical}: no ray-tracing or Monte Carlo sampling
+    is required for the hadronic shower component.
+  \item \textbf{Gaussian angular profile}: the detector response falls
+    as $e^{-\alpha^2/2\shad^2}$, favoring on-axis geometries.
+\end{itemize}
+
+\noindent
+\textbf{Numerical constants used in the implementation:}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Symbol & Value & Description \\
+\midrule
+$\Ec$ & 80 MeV & Critical energy in air \\
+$X_0$ & 36.62 g\,cm$^{-2}$ & Radiation length of air \\
+$\rho_0$ & $1.225 \times 10^{-3}$ g\,cm$^{-3}$ & Sea-level air density \\
+$n$ & 1.0003 & Refractive index of air (sea level) \\
+$\lambda_{\min},\,\lambda_{\max}$ & 300, 1000 nm & Cherenkov wavelength band \\
+$dN/d\ell|_{\text{sea}}$ & 64 m$^{-1}$ & Cherenkov yield at sea level \\
+$\CCH$ & 19,200 & Photons per $(E/\Ec)$ \\
+$\shad$ & $10^\circ$ & Hadronic angular spread \\
+$\Rdet$ & 2 m & Detector radius \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Application to HNL Signal}
+\label{sec:signal}
+%======================================================================
+
+The HNL decay $N_4 \to \mu + \text{hadrons}$ produces a muon of energy
+$\Emu$ and a hadronic system of energy $\Ehad = \EHNL - \Emu$.  Both
+are available from the pre-computed Monte Carlo data tables, which
+contain the full four-momenta $(E_N, \vec{p}_N)$ and
+$(\Emu, \vec{p}_\mu)$ for each simulated decay.
+
+The hadronic shower direction is determined by momentum conservation:
+\begin{equation}
+  \vec{p}_{\mathrm{had}} \;=\;
+  \EHNL\,\hat{d}_N - \Emu\,\hat{d}_\mu\,,
+  \qquad
+  \hat{d}_{\mathrm{had}} \;=\;
+  \frac{\vec{p}_{\mathrm{had}}}{|\vec{p}_{\mathrm{had}}|}\,.
+  \label{eq:had_dir}
+\end{equation}
+The total detected photon count for each MC event is then
+\begin{equation}
+  N_{\mathrm{det}}^{\mathrm{total}}
+  \;=\;
+  N_{\mathrm{det}}^{\mu}
+  \;+\;
+  N_{\mathrm{det}}^{\mathrm{had}}\,,
+\end{equation}
+where $N_{\mathrm{det}}^{\mu}$ is computed from the muon track via
+standard Cherenkov ray-tracing (the muon has no angular spread, so the
+narrow-cone geometry must be preserved), and
+$N_{\mathrm{det}}^{\mathrm{had}}$ is given by
+Eq.~\eqref{eq:master}.
+
+%======================================================================
+\section{Application to Neutrino Background}
+\label{sec:background}
+%======================================================================
+
+The beam-induced neutrino background arises from the same DIS process
+that produces HNLs, but with zero mass:
+$\mu + N \to \nu_\mu + X$.  These neutrinos travel upward and interact
+in the atmosphere via charged-current DIS:
+\begin{equation}
+  \nu_\mu + N \to \mu + X\,.
+\end{equation}
+The inelasticity $y$ is sampled from
+$d\sigma/dy \propto 1 + (1-y)^2$, giving
+\begin{equation}
+  \Emu^{\mathrm{out}} = (1-y)\,E_\nu\,,
+  \qquad
+  \Ehad = y\,E_\nu\,.
+\end{equation}
+The hadronic shower direction is taken as the neutrino direction
+(collinear approximation), and the muon direction is scattered by a
+characteristic angle $\sim m_\mu / \Emu^{\mathrm{out}}$ from the
+neutrino.  The detected photon count is again
+\begin{equation}
+  N_{\mathrm{det}}^{\mathrm{bg}}
+  \;=\;
+  N_{\mathrm{det}}^{\mu,\mathrm{bg}}
+  \;+\;
+  N_{\mathrm{det}}^{\mathrm{had,bg}}\,,
+\end{equation}
+with $N_{\mathrm{det}}^{\mathrm{had,bg}}$ from Eq.~\eqref{eq:master}
+using $\Ehad = y\,E_\nu$ and the neutrino direction as the shower axis.
+
+Each background event carries the CC interaction weight
+$w = \sigma_{\mathrm{CC}}(E_\nu) \times
+\mathcal{N}_{\mathrm{col}}(z_{\max})$,
+representing the probability that the neutrino interacts in the
+atmospheric column below the detector.
+
+%======================================================================
+\section{Numerical Validation}
+\label{sec:validation}
+%======================================================================
+
+\subsection{Yield constant}
+
+The computed value of $\CCH$ from the code is
+\begin{equation}
+  \CCH = \frac{X_0}{\rho_0}
+  \times \left.\frac{dN}{d\ell}\right|_{\text{sea}}
+  = 298.9\;\text{m} \times 64.2\;\text{m}^{-1}
+  = 19{,}181\;\text{photons}\;\text{per}\;(E/\Ec),
+\end{equation}
+consistent with the estimate of $\sim 19{,}200$.
+
+\subsection{Example: 5~GeV hadronic shower}
+
+Consider a 5~GeV hadronic shower at altitude $z = 5$~km, with a
+detector directly above at $z = 10$~km (distance $d = 5$~km, on-axis
+$\alpha = 0$):
+\begin{align}
+  \fEM(5) &= 1 - 5^{-0.14} = 0.202\,, \\
+  N_{\gamma}^{\mathrm{had}} &= 0.202 \times \frac{5}{0.080}
+    \times 19{,}181 = 242{,}000\;\text{photons}\,, \\
+  \Phi(0^\circ) &= \frac{\pi \times 2^2}{2\pi \times
+    (10\pi/180)^2 \times (5000)^2}
+    = 2.6 \times 10^{-6}\,, \\
+  N_{\mathrm{det}} &\approx 242{,}000 \times 2.6 \times 10^{-6}
+    \times \mathcal{T}
+    \approx 0.6\,\mathcal{T}\;\text{photons}\,.
+\end{align}
+With $\mathcal{T} \sim 0.8$ at 5~km altitude and moderate zenith angle,
+this gives $N_{\mathrm{det}} \approx 0.5$ photons.  While sub-threshold
+on its own, this adds to the muon-track contribution and can push
+borderline events above the detection threshold.
+
+\subsection{Angular dependence}
+
+The Gaussian suppression was verified against the analytical prediction:
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+$\alpha$ & $N_{\mathrm{det}}/N_{\mathrm{det}}(0)$ (code) &
+$\exp(-\alpha^2/2\shad^2)$ \\
+\midrule
+$0^\circ$  & 1.000 & 1.000 \\
+$5^\circ$  & 0.881 & 0.882 \\
+$15^\circ$ & 0.320 & 0.325 \\
+$30^\circ$ & 0.010 & 0.011 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The small deviations at large $\alpha$ arise from the
+altitude-dependent atmospheric transmission varying with zenith angle.
+
+%======================================================================
+\section{Summary}
+\label{sec:summary}
+%======================================================================
+
+The analytical hadronic shower Cherenkov model provides a closed-form
+expression (Eq.~\ref{eq:master}) for the detected photon count from
+hadronic showers in the atmosphere.  The key physical ingredients are:
+
+\begin{enumerate}[nosep]
+  \item The \textbf{calorimetric track-length integral}: total
+    Cherenkov yield $\propto E$, altitude-independent.
+  \item The \textbf{EM-fraction scaling}: hadronic showers produce
+    Cherenkov light proportional to their EM content,
+    $\fEM = 1 - E^{-0.14}$.
+  \item The \textbf{Gaussian geometric acceptance}: valid when
+    $\shad \gg \thetaC$, replacing per-particle ray-tracing.
+\end{enumerate}
+
+\noindent
+This model is applied identically to both HNL signal decays
+($N_4 \to \mu + \text{hadrons}$) and neutrino DIS background events
+($\nu_\mu + N \to \mu + X$), ensuring consistent treatment of the
+hadronic Cherenkov contribution throughout the sensitivity analysis.
+
+\begin{thebibliography}{10}
+
+\bibitem{Nerling2006}
+F.~Nerling, J.~Bl\"umer, R.~Engel, and M.~Risse,
+``Universality of electron distributions in high-energy air showers ---
+Description of Cherenkov light production,''
+\textit{Astropart.\ Phys.}\ \textbf{24}, 421 (2006),
+\href{https://arxiv.org/abs/astro-ph/0506729}{arXiv:astro-ph/0506729}.
+
+\bibitem{IceCube2013}
+IceCube Collaboration,
+``Calculation of the Cherenkov light yield from electromagnetic
+cascades in ice with Geant4,''
+\textit{Astropart.\ Phys.}\ \textbf{44}, 102 (2013),
+\href{https://arxiv.org/abs/1210.5140}{arXiv:1210.5140}.
+
+\bibitem{Yuan2025}
+T.~Yuan \textit{et al.},
+``Probabilistic modeling of Cherenkov emission from particle showers,''
+(2025),
+\href{https://arxiv.org/abs/2601.00944}{arXiv:2601.00944}.
+
+\bibitem{Gaisser1990}
+T.~K.~Gaisser,
+\textit{Cosmic Rays and Particle Physics},
+Cambridge University Press (1990).
+
+\bibitem{Wigmans2000}
+R.~Wigmans,
+\textit{Calorimetry: Energy Measurement in Particle Physics},
+Oxford University Press (2000).
+
+\bibitem{FrankTamm1937}
+I.~Frank and I.~Tamm,
+``Coherent visible radiation of fast electrons passing through matter,''
+\textit{Dokl.\ Akad.\ Nauk SSSR}\ \textbf{14}, 109 (1937).
+
+\end{thebibliography}
+
+\end{document}

@@ -323,6 +323,100 @@ def cherenkov_photons_detected_vectorized(r_0, p_hat, track_length, R_det,
     return N_photons, s_arr[nonzero_mask], N_photons_per_step[nonzero_mask]
 
 
+def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
+                                     detector_positions,
+                                     n=N_AIR, N_psi=100, N_track=100):
+    """
+    Compute Cherenkov photons hitting multiple detectors from a single track.
+
+    The Cherenkov emission (directions and emission points) is computed once
+    and reused for all detectors, avoiding redundant ray generation.
+
+    Each detector is a flat disk of radius R_det with normal along -z
+    (facing downward), centered at the given 3D position.
+
+    Parameters
+    ----------
+    r_0 : array-like, shape (3,)
+        Starting position of the charged particle [m] (absolute coordinates)
+    p_hat : array-like, shape (3,)
+        Unit vector of particle direction
+    track_length : float
+        Length of particle track [m]
+    R_det : float
+        Radius of circular detector [m]
+    detector_positions : array-like, shape (N_det, 3)
+        Absolute 3D positions of each detector [m]
+    n : float, optional
+        Index of refraction (default: 1.0003 for air)
+    N_psi : int, optional
+        Number of azimuthal samples for Cherenkov cone (default: 100)
+    N_track : int, optional
+        Number of samples along track (default: 100)
+
+    Returns
+    -------
+    N_photons : ndarray, shape (N_det,)
+        Expected Cherenkov photons hitting each detector
+    """
+    r_0 = np.asarray(r_0, dtype=float)
+    p_hat = np.asarray(p_hat, dtype=float)
+    p_hat = p_hat / np.linalg.norm(p_hat)
+    detector_positions = np.asarray(detector_positions, dtype=float)
+    if detector_positions.ndim == 1:
+        detector_positions = detector_positions[np.newaxis, :]
+    N_det = detector_positions.shape[0]
+
+    theta_C = get_cherenkov_angle(n)
+    dN_dx = get_cherenkov_yield_per_meter(n)
+
+    # Azimuthal angles
+    psi_arr = np.linspace(0, 2*np.pi, N_psi, endpoint=False)
+
+    # Track positions
+    s_arr = np.linspace(0, track_length, N_track)
+    ds = track_length / (N_track - 1) if N_track > 1 else track_length
+
+    # Cherenkov directions (3, N_psi)
+    k_hat_arr = cherenkov_direction(p_hat, psi_arr, theta_C)
+
+    # All emission points in absolute coordinates (3, N_track)
+    r_emit_all = r_0[:, np.newaxis] + s_arr[np.newaxis, :] * p_hat[:, np.newaxis]
+
+    # For each detector, shift to detector-relative coordinates and test hits
+    # r_emit_all: (3, N_track), k_hat_arr: (3, N_psi)
+    N_photons = np.zeros(N_det)
+
+    for i_det in range(N_det):
+        det = detector_positions[i_det]
+
+        # Emission points relative to this detector: (3, N_track)
+        r_rel = r_emit_all - det[:, np.newaxis]
+
+        # Broadcast to (3, N_track, N_psi)
+        r_rel_broadcast = r_rel[:, :, np.newaxis]
+        k_hat_broadcast = k_hat_arr[:, np.newaxis, :]
+
+        # Time for each ray to reach detector z-plane (z_rel = 0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t = -r_rel_broadcast[2] / k_hat_broadcast[2]
+
+        # Intersection points in detector plane
+        x_int = r_rel_broadcast[0] + t * k_hat_broadcast[0]
+        y_int = r_rel_broadcast[1] + t * k_hat_broadcast[1]
+
+        # Check hits
+        r_squared = x_int**2 + y_int**2
+        hits = (t > 0) & (r_squared <= R_det**2)
+
+        # Fraction hitting at each track position
+        f_hit = np.sum(hits, axis=1) / N_psi  # shape (N_track,)
+
+        N_photons[i_det] = dN_dx * ds * np.sum(f_hit)
+
+    return N_photons
+
+
 class CherenkovLookupTable:
     """
     Pre-computed lookup table for fast Cherenkov photon calculation.

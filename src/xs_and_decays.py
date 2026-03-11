@@ -204,7 +204,7 @@ def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):
         dGamma_mu = muon_differential_decay_width(E_N, m_N, Umu2, Ue2)
         E_N_lab = E_muon/m_mu * E_N
         beta_gamma = np.sqrt(E_N_lab**2 - m_N**2) / m_N
-        ee_decay_length = hbar_in_GeV_s * c * beta_gamma / ee_dw
+        ee_decay_length = hbar_in_GeV_s * speed_of_light * beta_gamma / ee_dw
         decay_factor = det_length / ee_decay_length
         return dGamma_mu * decay_factor
 

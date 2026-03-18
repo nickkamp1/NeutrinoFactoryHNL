@@ -30,28 +30,29 @@ from src.background import compute_background_at_satellite
 # --- Grid parameters ---
 MASSES = np.array([5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30, 40, 50, 60, 70, 80, 90])
 U2_RANGE = np.logspace(-14, -7, 100)
-U2_BATCH_SIZE = 5
+U2_BATCH_SIZE = 1
 N_SAMPLES = 1000000
 N_SAMPLES_BKG = 1000000
 E_MU = 5000  # GeV
-MAX_CHERENKOV = 100000  # cap Cherenkov evaluations per point for uniform runtimes
 
 # Geometry
 DUMP_DEPTH = 100        # m (depth of beam dump origin below surface)
-DUMP_ANGLE = np.pi / 2 - 0.02  # rad (pi/2 = horizontal beam)
-SATELLITE_HEIGHT = 100000  # m (100 km, max height)
+DUMP_ANGLE = 1.53  # rad (pi/2 = horizontal beam)
 
 # Detector positions (multiple balloons)
 DETECTOR_POSITIONS = [
+    np.array([500, 0, 20000.0]),   # low balloon at 20 km: displaced 500 m in x
+     np.array([-500, 0, 20000.0]),  # low balloon at 20 km: displaced -500 m in x
+     np.array([0, 0, 20000.0]),   # low balloon at 20 km: centered
      np.array([500, 0, 50000.0]),   # low balloon at 50 km: displaced 500 m in x
      np.array([-500, 0, 50000.0]),  # low balloon at 50 km: displaced -500 m in x
      np.array([0, 0, 50000.0]),   # low balloon at 50 km: centered
      np.array([500, 0, 100000.0]),   # low balloon at 100 km: displaced 500 m in x
      np.array([-500, 0, 100000.0]),  # low balloon at 100 km: displaced -500 m in x
      np.array([0, 0, 100000.0]),   # low balloon at 100 km: centered
-     np.array([500, 0, 150000.0]),   # high balloon at 150 km: displaced 500 m in x
-     np.array([-500, 0, 150000.0]),  # high balloon at 150 km: displaced -500 m in x
-     np.array([0, 0, 150000.0]),   # high balloon at 150 km: centered
+    #  np.array([500, 0, 150000.0]),   # high balloon at 150 km: displaced 500 m in x
+    #  np.array([-500, 0, 150000.0]),  # high balloon at 150 km: displaced -500 m in x
+    #  np.array([0, 0, 150000.0]),   # high balloon at 150 km: centered
 ]
 
 N_MASSES = len(MASSES)
@@ -61,6 +62,7 @@ N_DET = len(DETECTOR_POSITIONS)
 # --- Parse args ---
 mass_idx = int(sys.argv[1])
 u2_batch_idx = int(sys.argv[2])
+run_bkg = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
 
 m_N = MASSES[mass_idx]
 u2_start = u2_batch_idx * U2_BATCH_SIZE
@@ -78,82 +80,88 @@ t0 = time.time()
 flux_geometry = HNLFluxGeometry(
     E_mu=E_MU,
     dump_depth=DUMP_DEPTH,
-    dump_angle=DUMP_ANGLE,
-    satellite_height=SATELLITE_HEIGHT,
+    dump_angle=DUMP_ANGLE
 )
 print(f"Geometry setup: {time.time()-t0:.1f}s")
 sys.stdout.flush()
 
 # --- Output directory ---
-outdir = os.path.join(project_root, "data", "scan_results")
+outdir = os.path.join(project_root, "data", "scan_results_balloon")
 os.makedirs(outdir, exist_ok=True)
 
-# --- Background (computed once for this geometry) ---
-print("Computing background...")
-t_bkg = time.time()
-bkg_photons, bkg_weights, N_nu_per_muon, bkg_ch_weight, bkg_positions = \
-    compute_background_at_satellite(
-        flux_geometry, N_samples=N_SAMPLES_BKG,
-        max_cherenkov_events=MAX_CHERENKOV,
-        detector_positions=DETECTOR_POSITIONS
-    )
-print(f"Background done: {time.time()-t_bkg:.1f}s")
-sys.stdout.flush()
-
-# --- Signal scan over U2 batch ---
-# Shape: (N_U2, N_det, N_samples)
-photon_counts_batch = np.zeros((len(U2_batch), N_DET, N_SAMPLES))
-decay_weights_batch = np.zeros((len(U2_batch), N_SAMPLES))
-decay_positions_batch = np.zeros((len(U2_batch), N_SAMPLES, 3))
-N_HNLs_per_muon_batch = np.zeros(len(U2_batch))
-cherenkov_weights_batch = np.ones(len(U2_batch))
-
-for i, U2 in enumerate(U2_batch):
-    t1 = time.time()
-    try:
-        ph_counts, decay_wts, n_hnl, ch_weight, decay_pts = \
-            compute_signal_at_satellite(
-                m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
-                use_energy_loss=True,
-                max_cherenkov_events=MAX_CHERENKOV,
-                detector_positions=DETECTOR_POSITIONS
-            )
-        photon_counts_batch[i] = ph_counts
-        decay_weights_batch[i] = decay_wts
-        decay_positions_batch[i] = decay_pts
-        N_HNLs_per_muon_batch[i] = n_hnl
-        cherenkov_weights_batch[i] = ch_weight
-    except Exception as e:
-        print(f"  WARNING: U2={U2:.2e} failed: {e}")
-
-    dt = time.time() - t1
-    print(f"  U2={U2:.2e} ({i+1}/{len(U2_batch)}): {dt:.1f}s, weight={cherenkov_weights_batch[i]:.2f}")
+if run_bkg:
+    # --- Background (computed once for this geometry) ---
+    print("Computing background...")
+    t_bkg = time.time()
+    bkg_photons, bkg_weights, N_nu_per_muon, bkg_ch_weight, bkg_positions = \
+        compute_background_at_satellite(
+            flux_geometry, N_samples=N_SAMPLES_BKG,
+            detector_positions=DETECTOR_POSITIONS
+        )
+    print(f"Background done: {time.time()-t_bkg:.1f}s")
     sys.stdout.flush()
 
-# --- Save results ---
-outfile = os.path.join(outdir, f"scan_mN_{m_N:.0f}_u2batch_{u2_batch_idx:03d}.npz")
-np.savez(outfile,
-         # Grid info
-         m_N=m_N,
-         u2_start=u2_start,
-         u2_end=u2_end,
-         U2_batch=U2_batch,
-         U2_range_full=U2_RANGE,
-         N_samples=N_SAMPLES,
-         N_samples_bkg=N_SAMPLES_BKG,
-         detector_positions=np.array(DETECTOR_POSITIONS),
-         # Signal: (N_U2, N_det, N_samples) photon counts
-         photon_counts=photon_counts_batch,
-         decay_weights=decay_weights_batch,
-         decay_positions=decay_positions_batch,
-         N_HNLs_per_muon=N_HNLs_per_muon_batch,
-         cherenkov_weights=cherenkov_weights_batch,
-         # Background: (N_det, N_samples_bkg)
-         bkg_photons=bkg_photons,
-         bkg_weights=bkg_weights,
-         bkg_positions=bkg_positions,
-         N_nu_per_muon=N_nu_per_muon,
-         bkg_cherenkov_weight=bkg_ch_weight)
+    # --- Save results ---
+    outfile = os.path.join(outdir, f"scan_background.npz")
+    np.savez(outfile,
+            # Grid info
+            N_samples_bkg=N_SAMPLES_BKG,
+            detector_positions=np.array(DETECTOR_POSITIONS),
+            # Background: (N_det, N_samples_bkg)
+            bkg_photons=bkg_photons,
+            bkg_weights=bkg_weights,
+            bkg_positions=bkg_positions,
+            N_nu_per_muon=N_nu_per_muon,
+            bkg_cherenkov_weight=bkg_ch_weight)
+
+else:
+
+    # --- Signal scan over U2 batch ---
+    # Shape: (N_U2, N_det, N_samples)
+    photon_counts_batch = np.zeros((len(U2_batch), N_DET, N_SAMPLES))
+    decay_weights_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    decay_positions_batch = np.zeros((len(U2_batch), N_SAMPLES, 3))
+    N_HNLs_per_muon_batch = np.zeros(len(U2_batch))
+    cherenkov_weights_batch = np.ones(len(U2_batch))
+
+    for i, U2 in enumerate(U2_batch):
+        t1 = time.time()
+        try:
+            ph_counts, decay_wts, n_hnl, ch_weight, decay_pts = \
+                compute_signal_at_satellite(
+                    m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
+                    use_energy_loss=True,
+                    detector_positions=DETECTOR_POSITIONS
+                )
+            photon_counts_batch[i] = ph_counts
+            decay_weights_batch[i] = decay_wts
+            decay_positions_batch[i] = decay_pts
+            N_HNLs_per_muon_batch[i] = n_hnl
+            cherenkov_weights_batch[i] = ch_weight
+        except Exception as e:
+            print(f"  WARNING: U2={U2:.2e} failed: {e}")
+
+        dt = time.time() - t1
+        print(f"  U2={U2:.2e} ({i+1}/{len(U2_batch)}): {dt:.1f}s, weight={cherenkov_weights_batch[i]:.2f}")
+        sys.stdout.flush()
+
+    # --- Save results ---
+    outfile = os.path.join(outdir, f"scan_mN_{m_N:.0f}_u2batch_{u2_batch_idx:03d}.npz")
+    np.savez(outfile,
+            # Grid info
+            m_N=m_N,
+            u2_start=u2_start,
+            u2_end=u2_end,
+            U2_batch=U2_batch,
+            U2_range_full=U2_RANGE,
+            N_samples=N_SAMPLES,
+            detector_positions=np.array(DETECTOR_POSITIONS),
+            # Signal: (N_U2, N_det, N_samples) photon counts
+            photon_counts=photon_counts_batch,
+            decay_weights=decay_weights_batch,
+            decay_positions=decay_positions_batch,
+            N_HNLs_per_muon=N_HNLs_per_muon_batch,
+            cherenkov_weights=cherenkov_weights_batch)
 
 print(f"Done! Saved to {outfile}")
 print(f"Total time: {time.time()-t0:.1f}s")

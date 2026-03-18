@@ -116,9 +116,10 @@ def sample_interaction_altitude(N, z_max_m, z_min_m=0., direction_cosine=1.0, un
         return -Hslant * np.log(exp_min - u * (exp_min - exp_max)), np.ones(N)
 
 
-def compute_background_at_satellite(flux_geometry, N_samples=1000,
-                                    max_cherenkov_events=None,
+def compute_background_at_satellite(flux_geometry,
                                     detector_positions=None,
+                                    N_samples=1000,
+                                    max_cherenkov_events=None,
                                     uniform_gen=False,
                                     include_hadronic_shower=True):
     """
@@ -137,9 +138,8 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
         Number of MC neutrino events
     max_cherenkov_events : int or None
         Cap on expensive Cherenkov evaluations
-    detector_positions : list of array-like or None
-        List of 3D detector positions [m]. If None, uses the single
-        position from flux_geometry.get_satellite_position().
+    detector_positions : list of array-like
+        List of 3D detector positions [m].
 
     Returns
     -------
@@ -156,9 +156,6 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
         Sampled interaction altitude for each event [m] (0 if not evaluated)
     """
     # Set up detector positions
-    single_detector = detector_positions is None
-    if single_detector:
-        detector_positions = [flux_geometry.get_satellite_position()]
     detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
     N_det = len(detector_positions)
     max_det_height = max(p[2] for p in detector_positions)
@@ -187,8 +184,6 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
     int_pos_all = np.zeros((N_samples, 3))
 
     if len(upward_indices) == 0:
-        if single_detector:
-            return photon_counts[0], interaction_weights, N_nu_per_muon, 1.0, int_pos_all
         return photon_counts, interaction_weights, N_nu_per_muon, 1.0, int_pos_all
 
     # --- 5. Compute P_CC for each upward neutrino ---
@@ -301,9 +296,6 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
 
             photon_counts[i_det, idx] = N_ph_mu_all[j] + N_ph_had
 
-    if single_detector:
-        return (photon_counts[0], interaction_weights*position_weights, N_nu_per_muon,
-                cherenkov_weight, int_pos_all)
     return (photon_counts, interaction_weights*position_weights, N_nu_per_muon,
             cherenkov_weight, int_pos_all)
 

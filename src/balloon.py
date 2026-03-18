@@ -507,16 +507,12 @@ class HNLFluxGeometry:
     dump_angle : float
         Angle of beam dump axis from vertical [rad].
         0 = straight up, pi/2 = horizontal.
-    satellite_height : float
-        Balloon/detector altitude above sea level [m]
     """
 
-    def __init__(self, E_mu=1500, dump_depth=200, dump_angle=np.pi/2,
-                 satellite_height=5000):
+    def __init__(self, E_mu=1500, dump_depth=200, dump_angle=np.pi/2):
         self.E_mu = E_mu
         self.dump_depth = dump_depth
         self.dump_angle = dump_angle
-        self.satellite_height = satellite_height
 
         # Compute beam dump path length through rock (curved-Earth geometry)
         self.L_target = dump_length_earth(dump_depth, dump_angle)
@@ -539,9 +535,6 @@ class HNLFluxGeometry:
 
         # cos surface exit angle, 1 = vertical, 0 = horizontal. For a flat Earth, this would be cos(dump_angle).
         self.cos_surface_exit_angle = self.dump_depth/self.L_target + self.L_target/(2*R_EARTH) - self.dump_depth**2 / (2*R_EARTH*self.L_target)
-
-        # Satellite position (directly above origin)
-        self.satellite_pos = np.array([0, 0, satellite_height])
 
         self.hnl_mc = {}
         self.available_masses = []
@@ -677,10 +670,6 @@ class HNLFluxGeometry:
         travel_distances = np.random.exponential(decay_length, N)
         decay_points = production_points + travel_distances[:, np.newaxis] * hnl_directions
         return decay_points, travel_distances
-
-    def get_satellite_position(self):
-        """Return the satellite/balloon position."""
-        return self.satellite_pos.copy()
 
 
 def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10,
@@ -850,10 +839,10 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
 
 
 def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
+                                detector_positions,
                                 N_samples=1000, use_energy_loss=True,
                                 include_hadronic_shower=True,
                                 max_cherenkov_events=None,
-                                detector_positions=None,
                                 uniform_gen=False):
     """
     Compute expected signal at one or more detector positions from HNL decays.
@@ -889,9 +878,8 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     max_cherenkov_events : int or None
         Cap on expensive Cherenkov evaluations.  The returned cherenkov_weight
         compensates for the subsampling.
-    detector_positions : list of array-like or None
-        List of 3D detector positions [m]. If None, uses the single
-        position from flux_geometry.get_satellite_position().
+    detector_positions : list of array-like
+        List of 3D detector positions [m].
 
     Returns
     -------
@@ -908,9 +896,6 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
         Sampled decay positions.
     """
     # Set up detector positions
-    single_detector = detector_positions is None
-    if single_detector:
-        detector_positions = [flux_geometry.get_satellite_position()]
     detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
     N_det = len(detector_positions)
     max_det_height = max(p[2] for p in detector_positions)
@@ -970,8 +955,6 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
     if not np.any(valid_decay):
         photon_counts = np.zeros((N_det, N_samples))
-        if single_detector:
-            return photon_counts[0], decay_weights, N_HNLs_per_muon, 1.0, decay_points
         return photon_counts, decay_weights, N_HNLs_per_muon, 1.0, decay_points
 
     photon_counts = np.zeros((N_det, N_samples))
@@ -1036,8 +1019,5 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
 
             photon_counts[i_det, idx] = N_ph_mu_all[j] + N_ph_had
 
-    if single_detector:
-        return (photon_counts[0], decay_weights * decay_pos_weights,
-                N_HNLs_per_muon, cherenkov_weight, decay_points)
     return (photon_counts, decay_weights * decay_pos_weights,
             N_HNLs_per_muon, cherenkov_weight, decay_points)

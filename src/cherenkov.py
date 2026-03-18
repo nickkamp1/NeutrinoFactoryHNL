@@ -2,10 +2,33 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
 # Default physical constants
-N_AIR = 1.0003  # index of refraction of air
+N_AIR = 1.0003  # index of refraction of air at sea level
 ALPHA = 1/137.035999084  # fine-structure constant
 LAMBDA_MIN = 300e-9  # minimum wavelength in meters
 LAMBDA_MAX = 1000e-9  # maximum wavelength in meters
+
+# Atmosphere
+_H_SCALE = 8500.0  # scale height [m]
+
+
+def n_air_at_altitude(altitude_m):
+    """
+    Index of refraction of air as a function of altitude.
+
+    n(z) = 1 + (n_0 - 1) * rho(z)/rho_0 = 1 + (n_0 - 1) * exp(-z/H)
+
+    Parameters
+    ----------
+    altitude_m : float or array
+        Altitude above sea level [m]
+
+    Returns
+    -------
+    n : float or array
+        Index of refraction
+    """
+    delta_n = N_AIR - 1.0  # 3e-4 at sea level
+    return 1.0 + delta_n * np.exp(-np.asarray(altitude_m, dtype=float) / _H_SCALE)
 
 
 def cherenkov_transmission(altitude_m, zenith_angle_rad, lambda_min=LAMBDA_MIN, lambda_max=LAMBDA_MAX):
@@ -269,18 +292,25 @@ def cherenkov_photons_detected(r_0, p_hat, track_length, R_det,
 
 
 def cherenkov_photons_detected_vectorized(r_0, p_hat, track_length, R_det,
-                                          n=N_AIR, N_psi=100, N_track=100):
+                                          n=N_AIR, N_psi=100, N_track=100,
+                                          altitude_start=None, cos_beam_angle=1.0):
     """
     Vectorized version of cherenkov_photons_detected for better performance.
 
-    Same parameters and return value as cherenkov_photons_detected.
+    Same parameters and return value as cherenkov_photons_detected, with
+    optional altitude-dependent index of refraction.
+
+    Parameters
+    ----------
+    altitude_start : float or None
+        If provided, use altitude-dependent n(z). Real altitude [m] of r_0.
+    cos_beam_angle : float
+        Cosine of angle between particle direction and vertical.
+        Used with altitude_start to compute altitude along track.
     """
     r_0 = np.asarray(r_0, dtype=float)
     p_hat = np.asarray(p_hat, dtype=float)
     p_hat = p_hat / np.linalg.norm(p_hat)
-
-    theta_C = get_cherenkov_angle(n)
-    dN_dx = get_cherenkov_yield_per_meter(n)
 
     # Azimuthal angles
     psi_arr = np.linspace(0, 2*np.pi, N_psi, endpoint=False)
@@ -289,23 +319,44 @@ def cherenkov_photons_detected_vectorized(r_0, p_hat, track_length, R_det,
     s_arr = np.linspace(0, track_length, N_track)
     ds = track_length / (N_track - 1) if N_track > 1 else track_length
 
-    # Cherenkov directions (3, N_psi)
-    k_hat_arr = cherenkov_direction(p_hat, psi_arr, theta_C)
-
     # All emission points (3, N_track)
     r_emit_all = r_0[:, np.newaxis] + s_arr[np.newaxis, :] * p_hat[:, np.newaxis]
 
-    # Broadcast to (3, N_track, N_psi)
+    # Per-step Cherenkov parameters
+    if altitude_start is not None:
+        altitudes = np.maximum(altitude_start + s_arr * cos_beam_angle, 0.0)
+        n_arr = n_air_at_altitude(altitudes)
+        theta_C_arr = np.arccos(1.0 / n_arr)
+        dN_dx_arr = (2 * np.pi * ALPHA * np.sin(theta_C_arr)**2
+                     * (1/LAMBDA_MIN - 1/LAMBDA_MAX))
+    else:
+        theta_C_val = get_cherenkov_angle(n)
+        dN_dx_val = get_cherenkov_yield_per_meter(n)
+        theta_C_arr = np.full(N_track, theta_C_val)
+        dN_dx_arr = np.full(N_track, dN_dx_val)
+
+    # Cherenkov directions per track step: (3, N_track, N_psi)
+    e1, e2 = orthonormal_basis(p_hat)
+    cos_psi = np.cos(psi_arr)
+    sin_psi = np.sin(psi_arr)
+    cos_tC = np.cos(theta_C_arr)
+    sin_tC = np.sin(theta_C_arr)
+
+    k_hat_all = (cos_tC[np.newaxis, :, np.newaxis] * p_hat[:, np.newaxis, np.newaxis]
+                 + sin_tC[np.newaxis, :, np.newaxis]
+                 * (cos_psi[np.newaxis, np.newaxis, :] * e1[:, np.newaxis, np.newaxis]
+                    + sin_psi[np.newaxis, np.newaxis, :] * e2[:, np.newaxis, np.newaxis]))
+
+    # Broadcast emission points to (3, N_track, N_psi)
     r_emit_broadcast = r_emit_all[:, :, np.newaxis]
-    k_hat_broadcast = k_hat_arr[:, np.newaxis, :]
 
     # Time to reach z=0
     with np.errstate(divide='ignore', invalid='ignore'):
-        t = -r_emit_broadcast[2] / k_hat_broadcast[2]
+        t = -r_emit_broadcast[2] / k_hat_all[2]
 
     # Intersection points
-    x_int = r_emit_broadcast[0] + t * k_hat_broadcast[0]
-    y_int = r_emit_broadcast[1] + t * k_hat_broadcast[1]
+    x_int = r_emit_broadcast[0] + t * k_hat_all[0]
+    y_int = r_emit_broadcast[1] + t * k_hat_all[1]
 
     # Check hits
     r_squared = x_int**2 + y_int**2
@@ -314,18 +365,19 @@ def cherenkov_photons_detected_vectorized(r_0, p_hat, track_length, R_det,
     # Fraction hitting at each track position
     f_hit = np.sum(hits, axis=1) / N_psi  # shape (N_track,)
 
-    # Total photons
-    N_photons = dN_dx * ds * np.sum(f_hit)
+    # Total photons (weighted by local dN/dx)
+    N_photons_per_step = dN_dx_arr * ds * f_hit
+    N_photons = np.sum(N_photons_per_step)
 
-    N_photons_per_step = dN_dx * ds * f_hit
-    nonzero_mask = N_photons_per_step>0
+    nonzero_mask = N_photons_per_step > 0
 
     return N_photons, s_arr[nonzero_mask], N_photons_per_step[nonzero_mask]
 
 
 def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
                                      detector_positions,
-                                     n=N_AIR, N_psi=100, N_track=100):
+                                     n=N_AIR, N_psi=100, N_track=100,
+                                     altitude_start=None, cos_beam_angle=1.0):
     """
     Compute Cherenkov photons hitting multiple detectors from a single track.
 
@@ -348,11 +400,22 @@ def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
     detector_positions : array-like, shape (N_det, 3)
         Absolute 3D positions of each detector [m]
     n : float, optional
-        Index of refraction (default: 1.0003 for air)
+        Index of refraction (default: 1.0003 for air).
+        Used only when altitude_start is None (uniform-n mode).
     N_psi : int, optional
         Number of azimuthal samples for Cherenkov cone (default: 100)
     N_track : int, optional
         Number of samples along track (default: 100)
+    altitude_start : float or None, optional
+        If provided, use altitude-dependent n(z) along the track.
+        This is the real altitude [m] of the track starting point r_0.
+        The altitude at each emission point is computed as
+        altitude_start + s * cos_beam_angle, where s is the distance
+        along the track.
+    cos_beam_angle : float, optional
+        Cosine of the angle between the particle direction and vertical.
+        Used to convert distance along track to altitude change when
+        altitude_start is not None. Default 1.0 (vertical track).
 
     Returns
     -------
@@ -367,9 +430,6 @@ def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
         detector_positions = detector_positions[np.newaxis, :]
     N_det = detector_positions.shape[0]
 
-    theta_C = get_cherenkov_angle(n)
-    dN_dx = get_cherenkov_yield_per_meter(n)
-
     # Azimuthal angles
     psi_arr = np.linspace(0, 2*np.pi, N_psi, endpoint=False)
 
@@ -377,14 +437,42 @@ def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
     s_arr = np.linspace(0, track_length, N_track)
     ds = track_length / (N_track - 1) if N_track > 1 else track_length
 
-    # Cherenkov directions (3, N_psi)
-    k_hat_arr = cherenkov_direction(p_hat, psi_arr, theta_C)
-
     # All emission points in absolute coordinates (3, N_track)
     r_emit_all = r_0[:, np.newaxis] + s_arr[np.newaxis, :] * p_hat[:, np.newaxis]
 
+    # Compute per-step Cherenkov parameters
+    if altitude_start is not None:
+        # Altitude-dependent n, theta_C, dN_dx at each emission point
+        altitudes = altitude_start + s_arr * cos_beam_angle
+        altitudes = np.maximum(altitudes, 0.0)
+        n_arr = n_air_at_altitude(altitudes)             # (N_track,)
+        theta_C_arr = np.arccos(1.0 / n_arr)             # (N_track,)
+        dN_dx_arr = (2 * np.pi * ALPHA
+                     * np.sin(theta_C_arr)**2
+                     * (1/LAMBDA_MIN - 1/LAMBDA_MAX))     # (N_track,)
+    else:
+        # Uniform n (original behavior)
+        theta_C_val = get_cherenkov_angle(n)
+        dN_dx_val = get_cherenkov_yield_per_meter(n)
+        theta_C_arr = np.full(N_track, theta_C_val)
+        dN_dx_arr = np.full(N_track, dN_dx_val)
+
+    # Pre-compute Cherenkov directions for each track step
+    # k_hat_all shape: (3, N_track, N_psi)
+    e1, e2 = orthonormal_basis(p_hat)
+    cos_psi = np.cos(psi_arr)  # (N_psi,)
+    sin_psi = np.sin(psi_arr)  # (N_psi,)
+    cos_tC = np.cos(theta_C_arr)  # (N_track,)
+    sin_tC = np.sin(theta_C_arr)  # (N_track,)
+
+    # k_hat = cos(tC) * p_hat + sin(tC) * (cos(psi)*e1 + sin(psi)*e2)
+    # Shape: (3, N_track, N_psi)
+    k_hat_all = (cos_tC[np.newaxis, :, np.newaxis] * p_hat[:, np.newaxis, np.newaxis]
+                 + sin_tC[np.newaxis, :, np.newaxis]
+                 * (cos_psi[np.newaxis, np.newaxis, :] * e1[:, np.newaxis, np.newaxis]
+                    + sin_psi[np.newaxis, np.newaxis, :] * e2[:, np.newaxis, np.newaxis]))
+
     # For each detector, shift to detector-relative coordinates and test hits
-    # r_emit_all: (3, N_track), k_hat_arr: (3, N_psi)
     N_photons = np.zeros(N_det)
 
     for i_det in range(N_det):
@@ -395,15 +483,14 @@ def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
 
         # Broadcast to (3, N_track, N_psi)
         r_rel_broadcast = r_rel[:, :, np.newaxis]
-        k_hat_broadcast = k_hat_arr[:, np.newaxis, :]
 
         # Time for each ray to reach detector z-plane (z_rel = 0)
         with np.errstate(divide='ignore', invalid='ignore'):
-            t = -r_rel_broadcast[2] / k_hat_broadcast[2]
+            t = -r_rel_broadcast[2] / k_hat_all[2]
 
         # Intersection points in detector plane
-        x_int = r_rel_broadcast[0] + t * k_hat_broadcast[0]
-        y_int = r_rel_broadcast[1] + t * k_hat_broadcast[1]
+        x_int = r_rel_broadcast[0] + t * k_hat_all[0]
+        y_int = r_rel_broadcast[1] + t * k_hat_all[1]
 
         # Check hits
         r_squared = x_int**2 + y_int**2
@@ -412,7 +499,8 @@ def cherenkov_photons_multi_detector(r_0, p_hat, track_length, R_det,
         # Fraction hitting at each track position
         f_hit = np.sum(hits, axis=1) / N_psi  # shape (N_track,)
 
-        N_photons[i_det] = dN_dx * ds * np.sum(f_hit)
+        # Weight each step by its local dN/dx
+        N_photons[i_det] = ds * np.sum(dN_dx_arr * f_hit)
 
     return N_photons
 

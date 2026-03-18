@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hnl_balloon
 #SBATCH --partition=serial_requeue,shared,sapphire
-#SBATCH --array=0-279
+#SBATCH --array=0-359
 #SBATCH --time=0-3:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=8
@@ -9,7 +9,7 @@
 #SBATCH --error=cluster/logs/scan_%a.err
 #SBATCH --requeue
 
-# 280 tasks = 14 masses x 20 U2 batches (5 U2 points each)
+# 360 tasks = 18 masses x 20 U2 batches (5 U2 points each)
 N_U2_BATCHES=20
 
 MASS_IDX=$(( SLURM_ARRAY_TASK_ID / N_U2_BATCHES ))

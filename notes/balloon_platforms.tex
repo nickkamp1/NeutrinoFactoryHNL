@@ -24,16 +24,20 @@ Heavy Neutral Lepton Decays via Atmospheric Cherenkov Light}
 \maketitle
 
 \begin{abstract}
-We assess aerial platform options for a Cherenkov camera that would detect
+We assess platform options for a Cherenkov camera that would detect
 heavy neutral lepton (HNL) decays in the atmosphere, produced by a muon beam
 dump at a neutrino factory.  After surveying free-flying super-pressure
-balloons, high-altitude pseudo-satellites, station-keeping balloons, and
-tethered aerostats, we conclude that a \textbf{tethered aerostat at
-$\sim$5~km altitude} best satisfies the requirements of heavy payload
-capacity, indefinite station-keeping, and pointing stability.  Combined with
-a \textbf{horizontal beam dump geometry} that exploits Earth's curvature to
-produce a $\sim$250~km decay baseline, this configuration offers a practical
-path to a first-generation HNL search instrument.
+balloons, high-altitude pseudo-satellites, station-keeping balloons,
+tethered aerostats, and low Earth orbit (LEO) satellites, we conclude that a
+\textbf{tethered aerostat at $\sim$5~km altitude} best satisfies the
+near-term requirements of heavy payload capacity, indefinite
+station-keeping, and pointing stability.  We also evaluate a
+\textbf{LEO satellite constellation} at $\sim$500~km altitude, which
+eliminates the neutrino interaction background entirely at the cost of
+intermittent coverage and higher expense.  Combined with a
+\textbf{horizontal beam dump geometry} that exploits Earth's curvature to
+produce a $\sim$250~km decay baseline, these configurations offer
+complementary paths to an HNL search instrument.
 \end{abstract}
 
 \tableofcontents
@@ -74,11 +78,12 @@ aerial platform: heavy payload capacity (the camera is $\sim$350--900~kg),
 precise station-keeping, and long flight duration.
 
 The remainder of this note surveys the available platforms
-(Section~\ref{sec:detector}--\ref{sec:platforms}), argues that a tethered
+(Sections~\ref{sec:detector}--\ref{sec:platforms}), argues that a tethered
 aerostat is the best near-term solution (Section~\ref{sec:tethered}),
 introduces a horizontal beam geometry that exploits Earth's curvature
-(Section~\ref{sec:geometry}), and outlines the remaining trade-off
-studies (Section~\ref{sec:outlook}).
+(Section~\ref{sec:geometry}), evaluates LEO satellites as a
+background-free alternative (Section~\ref{sec:leo}), and outlines the
+remaining trade-off studies (Section~\ref{sec:outlook}).
 
 
 %======================================================================
@@ -130,7 +135,7 @@ for platform selection.
 \label{sec:platforms}
 %======================================================================
 
-We consider four classes of aerial platforms.  Their key characteristics
+We consider five classes of platforms.  Their key characteristics
 are compared in Table~\ref{tab:platforms}.
 
 \begin{table}[h]
@@ -145,9 +150,11 @@ Super-pressure balloon   & 33~km   & $\lesssim$2500~kg & None (drifts) & Weeks--
 HAPS drone               & 20--23~km & 5--25~kg & GPS-guided & Months \\
 Station-keeping balloon  & 15--28~km & 25--50~kg & $\sim$50~km drift & Weeks--months \\
 Tethered aerostat        & $\leq$5~km & $\leq$1500~kg & Perfect (tethered) & Indefinite \\
+LEO satellite (single)   & 500~km  & 500--1500~kg & Orbital (passes only) & 3--5~yr \\
+LEO constellation ($\times 10$) & 500~km & 500--1500~kg & Orbital ($\sim$25\% duty) & 3--5~yr \\
 \bottomrule
 \end{tabular}
-\caption{Comparison of aerial platform options.}
+\caption{Comparison of platform options.}
 \label{tab:platforms}
 \end{table}
 
@@ -516,6 +523,192 @@ atmospheric transmission over distances of $\sim$10--50~km is
 $\mathcal{O}(10\text{--}50\%)$, depending on wavelength and geometry.
 A full treatment requires ray-tracing through the atmosphere,
 accounting for the altitude-dependent density profile.
+
+
+%======================================================================
+\section{Low Earth Orbit Satellite Platform}
+\label{sec:leo}
+%======================================================================
+
+An alternative to balloon-based detection is to place the Cherenkov
+camera on a low Earth orbit (LEO) satellite at $\sim$500~km altitude.
+At this height the atmospheric column density is negligible: neutrinos
+from the beam dump pass through effectively zero target material above
+the satellite, eliminating the charged-current interaction background
+entirely.  The trade-off is higher cost and intermittent coverage of
+the beam dump region.
+
+\subsection{Motivation: Background-Free Detection}
+
+In the horizontal beam geometry (Section~\ref{sec:geometry}), the
+neutrino interaction background scales with the atmospheric column
+depth traversed by beam neutrinos between the surface and the detector
+altitude.  For a nearly horizontal beam with surface exit angle
+$\theta_{\text{exit}}$, the slant column depth is
+$X \propto (1/\cos\theta_{\text{exit}}) \int_0^h \rho(z)\,dz$, which
+remains substantial at balloon altitudes of 2--5~km.  At 500~km,
+$\rho(z) \approx 0$ and the background vanishes.
+
+This makes LEO particularly attractive if the signal-to-background
+ratio at balloon altitude is unfavorable (${S/B \ll 1}$), as even a
+modest signal rate in a background-free environment can yield strong
+sensitivity.
+
+\subsection{Telescope Size and Satellite Class}
+
+The baseline PBR-style Cherenkov camera
+(Section~\ref{sec:detector}) has a $\sim$1~m aperture and a total
+instrument mass of 350--900~kg.  Hosting this on a LEO satellite
+requires a spacecraft in the \textbf{1,000--2,000~kg class}.
+For reference:
+\begin{itemize}[nosep]
+  \item \textbf{WorldView-3:} 1.1~m aperture, 2,800~kg total mass,
+        617~km altitude~\cite{WorldView3}.
+  \item \textbf{NUSES/Terzina} (launching 2026): 430~mm
+        Schmidt--Cassegrain with a 640-pixel SiPM focal plane at
+        535~km --- a direct pathfinder for space-based Cherenkov
+        detection with SiPMs~\cite{NUSES-Terzina}.
+  \item \textbf{POEMMA} (proposed): two 4~m Schmidt telescopes with
+        hybrid MAPMT$+$SiPM focal planes at 525~km, instrument mass
+        $\sim$1,550~kg each~\cite{POEMMA}.
+\end{itemize}
+A smaller 0.5~m telescope on a $\sim$500~kg satellite is a less
+expensive alternative with reduced collecting area.  The Schmidt
+optical design is more compact than Cassegrain, and SiPM focal planes
+are lighter than CCD/CMOS imagers, both of which help reduce the
+required satellite mass.
+
+SiPM radiation damage in the LEO environment is manageable for
+$\sim$3-year missions through thermal annealing
+protocols~\cite{NUSES-Terzina}.
+
+\subsection{Orbital Coverage of the Beam Dump Region}
+
+The HNL decay region extends $\sim$250~km along the beam axis at
+0--5~km altitude.  A satellite at 500~km altitude has a large
+instantaneous footprint but passes over any given ground region for
+only $\sim$5--10~minutes per pass, with 2--4 passes per day (depending
+on orbital inclination and the latitude of the beam dump).
+
+Furthermore, Cherenkov detection requires darkness (the optical
+Cherenkov flash must be distinguished from daylight backgrounds),
+so only nighttime passes are useful --- roughly half of the total.
+
+Table~\ref{tab:leo_coverage} summarizes the duty cycle as a function
+of constellation size.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Configuration} & \textbf{Satellites} &
+\textbf{Duty cycle} & \textbf{Approx.\ cost} \\
+\midrule
+Single satellite     & 1  & $\sim$1--3\%  & \$60--215M \\
+Stereo pair          & 2  & $\sim$1--3\%  & \$120--430M \\
+Moderate coverage    & 10 & $\sim$25\%    & \$200M--1B$^*$ \\
+Near-continuous      & 30 & $\sim$75\%    & \$500M--2B$^*$ \\
+\bottomrule
+\multicolumn{4}{l}{\footnotesize $^*$Mass production could reduce
+per-unit costs by 3--10$\times$.}
+\end{tabular}
+\caption{LEO constellation coverage of the beam dump region
+and estimated cost.  Duty cycle accounts for the nighttime-only
+constraint.}
+\label{tab:leo_coverage}
+\end{table}
+
+For reference, the Iridium constellation uses 66~satellites at 781~km
+for continuous global communications, and Planet Labs operates
+$\sim$200 Dove satellites for daily global imaging.
+
+\subsection{Stereo Reconstruction from Orbit}
+
+Two satellites in the same orbital plane, separated along-track by
+$\sim$300~km, provide continuous stereo observation during each
+pass over the beam dump region.  This is the configuration adopted
+by POEMMA (adjustable 25--1000~km separation) and demonstrated by
+the DUSAT mission (two 95~kg satellites at 394~km
+separation, $\sim$\$32M total~\cite{DUSAT}).
+
+Using the stereo resolution formulae from
+Section~\ref{sec:discrimination} with $D \sim 500$~km,
+$B \sim 300$~km, and $\delta\theta = 0.2^\circ \approx 3.5$~mrad:
+\begin{align}
+  \sigma_\perp &= D \cdot \delta\theta
+    \approx 1.75~\text{km}, \\
+  \sigma_\parallel &= \frac{D^2\,\delta\theta}{B}
+    \approx 2.9~\text{km}.
+\end{align}
+This is coarser than balloon-based stereo (where $D \sim 10$--100~km)
+but sufficient to distinguish events at different altitudes along the
+beam and to reject backgrounds from cosmic-ray air showers or other
+non-beam sources.
+
+\subsection{Cost Estimates}
+
+For a one-off satellite carrying a 1~m Cherenkov telescope
+($\sim$1,500~kg total):
+\begin{itemize}[nosep]
+  \item \textbf{Satellite bus + instrument:} \$50--200M, depending on
+        heritage and level of custom engineering.
+  \item \textbf{Launch} (SpaceX Rideshare): \$5--15M for a 1,000--1,500~kg
+        payload to LEO~\cite{SpaceX-Rideshare}.
+  \item \textbf{Total per unit:} $\sim$\$60--215M.
+\end{itemize}
+
+A smaller telescope (0.5~m aperture, $\sim$500~kg satellite) would
+cost $\sim$\$20--60M per unit, making a 10-satellite constellation
+feasible at \$200--600M --- comparable in cost to a single large
+ground-based particle physics detector.
+
+At mass-production scale, standardized satellite buses can reduce
+per-unit costs dramatically: Starlink~V2~Mini satellites
+($\sim$800~kg) are estimated at \$300--500K each, though these carry
+far simpler payloads than a Cherenkov telescope.
+
+\subsection{Tethered Aerostat vs.\ LEO: Trade-offs}
+
+Table~\ref{tab:aerostat_vs_leo} compares the two leading platform
+options.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Tethered Aerostat} & \textbf{LEO Stereo Pair} \\
+\midrule
+Altitude           & 5~km          & 500~km \\
+Duty cycle         & $\sim$100\%   & $\sim$1--3\% \\
+Background         & Significant   & Negligible \\
+Cost (3-year)      & \$14--22M     & \$120--430M \\
+Stereo baseline    & 15--30~km     & $\sim$300~km \\
+Position resolution & 35--175~m    & 1.75~km \\
+Heritage           & TARS (decades) & NUSES/Terzina (2026) \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of the tethered aerostat and LEO stereo pair
+for HNL detection.}
+\label{tab:aerostat_vs_leo}
+\end{table}
+
+The key question is whether the background suppression at LEO
+altitude compensates for the $\sim$30$\times$ lower duty cycle and
+$\sim$10$\times$ higher cost.  If the signal-to-background ratio at
+balloon altitude is favorable ($S/B \gtrsim 1$), the tethered aerostat
+is clearly preferred: it is cheaper, provides continuous coverage,
+and enables finer spatial reconstruction.  If $S/B \ll 1$ at 5~km,
+the background-free LEO environment may be essential --- even a
+stereo pair with $\sim$3\% duty cycle would accumulate
+background-free signal events over a multi-year mission.
+
+A staged approach is natural: begin with a tethered aerostat to
+characterize the signal and background rates, then evaluate whether
+LEO is warranted based on the measured $S/B$.  The NUSES/Terzina
+mission (2026) will provide critical validation of SiPM-based
+Cherenkov cameras in the LEO radiation environment.
 
 
 %======================================================================
@@ -893,6 +1086,26 @@ trade-off studies are needed to optimize the configuration:
   TCOM, L.P.,
   ``TCOM Wins \$979M Army Tethered Aerostat Support Contract,''
   U.S.\ Department of Defense press release (2022).
+
+\bibitem{WorldView3}
+  DigitalGlobe,
+  ``WorldView-3 Satellite Sensor,''
+  \url{https://www.digitalglobe.com/resources/satellite-information} (2014).
+
+\bibitem{NUSES-Terzina}
+  R.~Aloisio \textit{et al.},
+  ``The NUSES space mission,''
+  \href{https://arxiv.org/abs/2306.09302}{arXiv:2306.09302} (2023).
+
+\bibitem{DUSAT}
+  A.~Torres-Garcia \textit{et al.},
+  ``DUSAT: A Dual Satellite System for Stereoscopic Earth Observation,''
+  \textit{Acta Astronautica} \textbf{225}, 255 (2024).
+
+\bibitem{SpaceX-Rideshare}
+  SpaceX,
+  ``Smallsat Rideshare Program,''
+  \url{https://www.spacex.com/rideshare/} (2024).
 
 \bibitem{FASER}
   FASER Collaboration,

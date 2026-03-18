@@ -210,8 +210,11 @@ def compute_background_at_satellite(flux_geometry, N_samples=1000,
         cherenkov_weight = 1.0
 
     # Pre-sample all interaction altitudes at once
-    z_int_all, position_weights = sample_interaction_altitude(len(eval_indices), z_max_m=max_det_height, uniform_gen=uniform_gen)
-    int_pos_all = np.zeros((len(eval_indices), 3))
+    z_int_all, pos_weights_eval = sample_interaction_altitude(len(eval_indices), z_max_m=max_det_height, uniform_gen=uniform_gen, direction_cosine=flux_geometry.cos_surface_exit_angle)
+    # Map position weights back to full N_samples array (ones for non-evaluated)
+    position_weights = np.ones(N_samples)
+    for i_eval, idx in enumerate(eval_indices):
+        position_weights[idx] = pos_weights_eval[i_eval]
 
     for i_eval, idx in enumerate(eval_indices):
         z_int = z_int_all[i_eval]

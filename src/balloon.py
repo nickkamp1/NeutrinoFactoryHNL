@@ -483,6 +483,10 @@ class HNLFluxGeometry:
         # For each production event at depth s_i along the dump:
         theta_rms = get_mcs_at_depths(s_table, theta_table, production_depths)
 
+        # 1. Get smeared muon directions (one per event)
+        beam_dirs = np.tile([0.0, 0.0, 1.0], (len(E_muon), 1))
+        muon_dirs = apply_mcs_smearing(beam_dirs, theta_rms)
+
         if mode == "scattering":
             if m_N is None:
                 df = BKG_MC
@@ -492,7 +496,7 @@ class HNLFluxGeometry:
                                         sampled.Pnuy.values/nu_Ptot,
                                         sampled.Pnuz.values/nu_Ptot))
                 # smear the nu direction by the MCS angle at the production depth
-                nu_dir = apply_mcs_smearing(nu_dir, theta_rms)
+                nu_dir = rotate_frame(nu_dir, muon_dirs)
                 return sampled.Pnue.values * E_muon/5000, nu_dir, None, None # approximation, tables are made for 5 TeV muons
 
             else:
@@ -512,8 +516,8 @@ class HNLFluxGeometry:
                                         sampled.Pmuy.values/mu_Ptot,
                                         sampled.Pmuz.values/mu_Ptot))
                 # smear the directions by the MCS angle at the production depth
-                hnl_dir = apply_mcs_smearing(hnl_dir, theta_rms)
-                mu_dir = apply_mcs_smearing(mu_dir, theta_rms)
+                hnl_dir = rotate_frame(hnl_dir, muon_dirs)
+                mu_dir = rotate_frame(mu_dir, muon_dirs)
                 return sampled.PNe.values * E_muon/5000, hnl_dir, sampled.Pmue.values * E_muon/5000, mu_dir # approximation, tables are made for 5 TeV muons
         elif mode == "decay":
             if m_N is None:

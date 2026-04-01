@@ -245,8 +245,9 @@ def apply_mcs_smearing(directions, theta_rms):
     """
     Apply MCS angular smearing to particle direction vectors.
 
-    For each particle, draws a random deflection angle from a 2D Gaussian
-    with width theta_rms (projected), then rotates the direction vector.
+    For each particle, draws a random deflection from a 2D Gaussian
+    with width theta_rms (projected) to get a new z-axis, then rotates
+    the input direction into that frame.
 
     Parameters
     ----------
@@ -262,34 +263,23 @@ def apply_mcs_smearing(directions, theta_rms):
     """
     N = len(directions)
     theta_rms = np.atleast_1d(np.asarray(theta_rms, dtype=float))
-    # MCS is Gaussian in two projected planes: theta_x and theta_y
-    theta_total = np.abs(np.random.normal(0, theta_rms, N))
-    phi_scat = np.random.uniform(0, 2*np.pi, N)
 
-    # Build perpendicular basis for each direction
-    d = directions
-    ref = np.zeros_like(d)
-    mostly_z = np.abs(d[:, 2]) > 0.9
-    ref[mostly_z] = [1.0, 0.0, 0.0]
-    ref[~mostly_z] = [0.0, 0.0, 1.0]
+    # Draw random deflection in two projected planes
+    theta_x = np.random.normal(0, theta_rms, N)
+    theta_y = np.random.normal(0, theta_rms, N)
+    theta_total = np.sqrt(theta_x**2 + theta_y**2)
+    phi_scat = np.arctan2(theta_y, theta_x)
 
-    # Gram-Schmidt to get e1 perp to d
-    e1 = ref - np.sum(ref * d, axis=1, keepdims=True) * d
-    e1 = e1 / np.linalg.norm(e1, axis=1, keepdims=True)
-    e2 = np.cross(d, e1)
-
-    # Smeared direction: rotate d by theta_total around axis in e1-e2 plane
-    cos_t = np.cos(theta_total)
+    # Build the deflected z-axis (new_z) for each event
     sin_t = np.sin(theta_total)
-    cos_p = np.cos(phi_scat)
-    sin_p = np.sin(phi_scat)
+    cos_t = np.cos(theta_total)
+    new_z = np.column_stack([
+        sin_t * np.cos(phi_scat),
+        sin_t * np.sin(phi_scat),
+        cos_t
+    ])
 
-    smeared = (cos_t[:, np.newaxis] * d
-               + sin_t[:, np.newaxis] * (cos_p[:, np.newaxis] * e1
-                                         + sin_p[:, np.newaxis] * e2))
-    smeared = smeared / np.linalg.norm(smeared, axis=1, keepdims=True)
-
-    return smeared
+    return rotate_frame(directions, new_z)
 
 
 def rotate_frame(directions, new_z):

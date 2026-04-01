@@ -19,6 +19,7 @@ sin2_theta_W = 0.23126 # weak mixing angle
 alpha = 1/137.035999084 # fine-structure constant
 speed_of_light = 3e8 # speed of light in m/s
 hbar_in_GeV_s = 6.582119569e-25 # hbar in GeV*s
+hbar_in_GeV_m = hbar_in_GeV_s * speed_of_light # hbar in GeV*m
 
 
 # units

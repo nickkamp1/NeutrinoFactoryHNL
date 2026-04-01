@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=hnl_balloon
-#SBATCH --partition=serial_requeue,shared,sapphire
+#SBATCH --partition=serial_requeue,shared,sapphire,arguelles_delgado
 #SBATCH --array=0-1800
 #SBATCH --time=0-4:00:00
 #SBATCH --mem=32G

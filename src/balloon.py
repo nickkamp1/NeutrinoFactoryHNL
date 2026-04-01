@@ -5,10 +5,81 @@ import pandas as pd
 from src.cherenkov import *
 from src.constants import *
 from src.xs_and_decays import *
+from src.flux import numu_flux
 
 # Earth radius [m]
 R_EARTH = 6.371e6
 
+def sample_numu_from_muon_decay(E_mu, P_mu=0.0):
+    """
+    Sample nu_mu energy and direction from muon decay analytically.
+
+    Samples in the muon rest frame where the distribution factorizes,
+    then boosts to the lab frame.
+
+    In the rest frame:
+        dN/(dx d(cosθ_cm)) ∝ x² [(3 - 2x) + P_mu·cosθ_cm·(1 - 2x)]
+    where x = 2E_nu_cm / m_mu ∈ [0, 1].
+
+    Parameters
+    ----------
+    E_mu : np array(float)
+        Muon energy in the lab frame [GeV]
+    P_mu : float
+        Muon polarization along the beam axis (-1 to +1). Default 0.
+
+    Returns
+    -------
+    E_nu_lab : ndarray, shape (len(E_mu),)
+        Neutrino energies in the lab frame [GeV]
+    cos_theta_lab : ndarray, shape (len(E_mu),)
+        Cosine of angle w.r.t. beam axis in the lab frame
+    """
+    gamma = E_mu / m_mu
+    beta = np.sqrt(1.0 - 1.0 / gamma**2)
+
+    # --- Step 1: sample x_cm from f(x) = x²(3-2x) via rejection ---
+    # Max of x²(3-2x) is 27/32 at x=3/4
+    f_max = 27.0 / 32.0
+    x_cm = np.empty(len(E_mu))
+    n_filled = 0
+    while n_filled < len(E_mu):
+        n_need = int(1.8 * (len(E_mu) - n_filled)) + 128  # ~59% acceptance
+        x_prop = np.random.uniform(0, 1, n_need)
+        f_val = x_prop**2 * (3.0 - 2.0 * x_prop)
+        accept = np.random.uniform(0, f_max, n_need) < f_val
+        x_accepted = x_prop[accept]
+        n_take = min(len(x_accepted), len(E_mu) - n_filled)
+        x_cm[n_filled:n_filled + n_take] = x_accepted[:n_take]
+        n_filled += n_take
+
+    # --- Step 2: sample cosθ_cm from P(c|x) = (1 + α·c)/2 on [-1,1] ---
+    # where α = P_mu·(1-2x)/(3-2x)
+    alpha = P_mu * (1.0 - 2.0 * x_cm) / (3.0 - 2.0 * x_cm)
+    u = np.random.uniform(0, 1, len(E_mu))
+
+    # Invert CDF: F(c) = (c+1)/2 + α(c²-1)/4 = u
+    # → α/4·c² + c/2 + (1/2 - α/4 - u) = 0
+    small_alpha = np.abs(alpha) < 1e-10
+    alpha_safe = np.where(small_alpha, 1.0, alpha)  # avoid division by zero
+    cos_cm = np.where(
+        small_alpha,
+        2.0 * u - 1.0,
+        (-1.0 + np.sqrt(np.maximum(1.0 + 2.0 * alpha_safe * (2.0 * u - 1.0 + alpha_safe), 0.0))) / alpha_safe
+    )
+    cos_cm = np.clip(cos_cm, -1.0, 1.0)
+
+    # --- Step 3: boost to lab frame ---
+    E_nu_cm = x_cm * m_mu / 2.0
+    E_nu_lab = gamma * E_nu_cm * (1.0 + beta * cos_cm)
+    cos_theta_lab = (cos_cm + beta) / (1.0 + beta * cos_cm)
+
+    return E_nu_lab, cos_theta_lab
+
+def mcs_angle(L,E_mu_init):
+    X0 = 26.5 # g/cm^2 for rock
+    x = L * 2.65  # g/cm^2
+    return 0.0136 * np.sqrt(x/X0) * (1 + 0.038 * np.log(x/X0)) / E_mu_init
 
 def dump_length_earth(dump_depth, dump_angle):
     """
@@ -167,7 +238,7 @@ def muon_range_in_air(E_mu_GeV, start_altitude_m, direction_cosine=1.0):
     """
 
     # muon lifetime
-    tau_mu = 2.2e3 # nanoseconds
+    tau_mu = 2.2e-6 # seconds
     L_mu = E_mu_GeV/ m_mu * speed_of_light * tau_mu
 
 
@@ -517,13 +588,12 @@ class HNLFluxGeometry:
         # Compute beam dump path length through rock (curved-Earth geometry)
         self.L_target = dump_length_earth(dump_depth, dump_angle)
 
-        # Beam direction at surface exit (angle from vertical ≈ dump_angle
-        # with negligible correction of order dump_depth / R_earth)
+        # Beam direction at surface exit in the beam frame, i.e. along z axis
         self.beam_offset_angle = dump_angle
         self.beam_dir = np.array([
-            np.sin(dump_angle),   # x component (horizontal)
-            0,                    # y component
-            np.cos(dump_angle)    # z component (positive = upward)
+            0,   # x component (horizontal)
+            0,   # y component
+            1    # z component (positive = upward)
         ])
 
         # Compute decay region length
@@ -549,21 +619,7 @@ class HNLFluxGeometry:
         idx = np.argmin(np.abs(self.available_masses - m_N))
         return self.available_masses[idx]
 
-    def sample_production_points(self, N_samples):
-        """
-        Sample HNL production points uniformly along the muon path in Earth.
-
-        Points are placed along the beam axis from the dump origin to the
-        surface exit point.
-        """
-        # Sample distance along beam from the dump origin (s=0) to surface (s=L_target)
-        s = np.random.uniform(0, self.L_target, N_samples)
-        # Convert to 3D: surface exit is at origin, beam goes in -beam_dir into Earth
-        s_from_exit = self.L_target - s
-        production_points = np.outer(-s_from_exit, self.beam_dir)
-        return production_points
-
-    def compute_weighted_production_rate(self, m_N, U2, N_depth_bins=100):
+    def compute_weighted_production_rate(self, m_N, U2, N_depth_bins=100, mode="scattering"):
         """
         Compute HNL production rate accounting for muon energy loss in Earth.
 
@@ -571,14 +627,18 @@ class HNLFluxGeometry:
         rock to the surface. Energy loss along the path reduces the cross
         section.
 
+        Supports production via both scattering and decay
+
         Returns
         -------
         N_HNLs_per_muon : float
             Total HNLs produced per muon, integrating sigma(E_mu(s)) along path.
         s_centers : ndarray
             Distance along beam from dump origin [m] for each bin center.
-        xs_weights : ndarray
-            Normalized cross-section weight at each bin (for importance sampling).
+        position_weight : ndarray
+            Normalized cross-section or decay weight at each bin (for importance sampling).
+        E_mu_local : ndarray
+            Muon energy at each bin center along the path [GeV]
         """
         # Discretize the beam path: s=0 at dump origin, s=L_target at surface
         s_edges = np.linspace(0, self.L_target, N_depth_bins + 1)
@@ -586,27 +646,31 @@ class HNLFluxGeometry:
         ds = s_edges[1] - s_edges[0]
 
         # Muon energy at each point: it has traversed s meters of rock
-        E_mu_local = muon_energy_in_earth(self.E_mu, s_centers)
+        E_mu_local = muon_energy_in_earth(self.E_mu, s_centers-s_centers[0])
 
-        # Cross section at each point
-        xs_local = np.array([sigma(E, m_N, U2) for E in E_mu_local])  # m^2
+        if mode == "scattering":
+            # Cross section at each point
+            scattering_coefficient_local = np.array([n_earth_m3 * sigma(E, m_N, U2) for E in E_mu_local])  # m^-1, TODO: needs to be updated to correct xs
+            position_weights = scattering_coefficient_local * ds
+        elif mode == "decay":
+            # Decay coefficient at each point: Gamma / (beta*gamma*c) = m/E * Gamma / hbar_in_GeV_m
+            decay_coefficient_local = np.array([m_mu/E * Gamma_muon / hbar_in_GeV_m if E>0 else 0 for E in E_mu_local]) # m^-1
+            position_weights = decay_coefficient_local * ds
 
-        # Integrated production rate: N = n_earth * sum(sigma_i * ds)
-        N_HNLs_per_muon = n_earth_m3 * np.sum(xs_local * ds)
+        # Integrated production rate: N = sum(decay or scattering length * ds)
+        N_HNLs_per_muon = np.sum(position_weights * ds)
 
-        # Normalized weights for importance sampling
-        xs_weights = xs_local * ds
-        total = np.sum(xs_weights)
+        total = np.sum(position_weights)
         if total > 0:
-            xs_weights = xs_weights / total
+            position_weights = position_weights / total
         else:
-            xs_weights = np.ones(N_depth_bins) / N_depth_bins
+            position_weights = np.ones(N_depth_bins) / N_depth_bins
 
-        return N_HNLs_per_muon, s_centers, xs_weights
+        return N_HNLs_per_muon, s_centers, position_weights, E_mu_local
 
-    def sample_production_points_weighted(self, m_N, U2, N_samples, N_depth_bins=100):
+    def sample_production_points_weighted(self, m_N, U2, N_samples, N_depth_bins=100, mode="scattering"):
         """
-        Sample HNL production points weighted by local cross section.
+        Sample HNL production points weighted by local cross section or decay length.
 
         Production positions are importance-sampled along the beam path:
         positions where the muon has higher energy (and thus higher cross
@@ -615,52 +679,66 @@ class HNLFluxGeometry:
         Returns
         -------
         production_points : ndarray, shape (N_samples, 3)
+        E_mu_local : ndarray, shape (N_samples,)
+            Muon energy at each production point [GeV]
         N_HNLs_per_muon : float
         """
-        N_HNLs_per_muon, s_centers, xs_weights = \
-            self.compute_weighted_production_rate(m_N, U2, N_depth_bins)
+        N_HNLs_per_muon, s_centers, position_weights, E_mu_local = \
+            self.compute_weighted_production_rate(m_N, U2, N_depth_bins, mode)
 
-        # Sample beam-path distance bins according to cross-section weights
-        bin_indices = np.random.choice(len(s_centers), size=N_samples, p=xs_weights)
+        # Sample beam-path distance bins according to position weights
+        bin_indices = np.random.choice(len(s_centers), size=N_samples, p=position_weights)
         ds = s_centers[1] - s_centers[0] if len(s_centers) > 1 else 1.0
         sampled_s = s_centers[bin_indices] + np.random.uniform(-ds/2, ds/2, N_samples)
 
         # Convert to 3D: surface exit at origin, beam comes from -beam_dir
         s_from_exit = self.L_target - sampled_s
         production_points = np.outer(-s_from_exit, self.beam_dir)
-        return production_points, N_HNLs_per_muon
+        return production_points, E_mu_local, N_HNLs_per_muon, s_centers
 
-    def sample_kinematics(self, N_samples, m_N=None,):
+    def sample_kinematics(self, E_muon, m_N=None, mode="scattering"):
         """
         Sample HNL and muon kinematics from pre-computed MC data.
 
-        Samples N_samples events with replacement from the MC DataFrame
+        Samples len(E_muon) events with replacement from the MC DataFrame
         for the nearest available HNL mass.
         """
-        if m_N is None:
-            df = BKG_MC
-            sampled = df.sample(n=N_samples, replace=True)
-            nu_Ptot = np.sqrt(sampled.Pnux.values**2 + sampled.Pnuy.values**2 + sampled.Pnuz.values**2)
-            nu_dir = np.column_stack((sampled.Pnux.values/nu_Ptot,
-                                      sampled.Pnuy.values/nu_Ptot,
-                                    sampled.Pnuz.values/nu_Ptot))
-            return sampled.Pnue.values, nu_dir, None, None
 
-        else:
-            mc_mass = self._nearest_mc_mass(m_N)
-            df = self.hnl_mc[mc_mass]
-            sampled = df.sample(n=N_samples, replace=True)
+        if mode == "scattering":
+            if m_N is None:
+                df = BKG_MC
+                sampled = df.sample(n=len(E_muon), replace=True)
+                nu_Ptot = np.sqrt(sampled.Pnux.values**2 + sampled.Pnuy.values**2 + sampled.Pnuz.values**2)
+                nu_dir = np.column_stack((sampled.Pnux.values/nu_Ptot,
+                                        sampled.Pnuy.values/nu_Ptot,
+                                        sampled.Pnuz.values/nu_Ptot))
+                return sampled.Pnue.values * E_muon/5000, nu_dir, None, None # approximation, tables are made for 5 TeV muons
 
-            hnl_Ptot = np.sqrt(sampled.PNx.values**2 + sampled.PNy.values**2 + sampled.PNz.values**2)
-            hnl_dir = np.column_stack((sampled.PNx.values/hnl_Ptot,
-                                    sampled.PNy.values/hnl_Ptot,
-                                    sampled.PNz.values/hnl_Ptot))
-            mu_Ptot = np.sqrt(sampled.Pmux.values**2 + sampled.Pmuy.values**2 + sampled.Pmuz.values**2)
-            mu_dir = np.column_stack((sampled.Pmux.values/mu_Ptot,
-                                    sampled.Pmuy.values/mu_Ptot,
-                                    sampled.Pmuz.values/mu_Ptot))
+            else:
+                mc_mass = self._nearest_mc_mass(m_N)
+                df = self.hnl_mc[mc_mass]
+                sampled = df.sample(n=len(E_muon), replace=True)
 
-            return sampled.PNe.values, hnl_dir, sampled.Pmue.values, mu_dir
+                hnl_Ptot = np.sqrt(sampled.PNx.values**2 + sampled.PNy.values**2 + sampled.PNz.values**2)
+                hnl_dir = np.column_stack((sampled.PNx.values/hnl_Ptot,
+                                        sampled.PNy.values/hnl_Ptot,
+                                        sampled.PNz.values/hnl_Ptot))
+                mu_Ptot = np.sqrt(sampled.Pmux.values**2 + sampled.Pmuy.values**2 + sampled.Pmuz.values**2)
+                mu_dir = np.column_stack((sampled.Pmux.values/mu_Ptot,
+                                        sampled.Pmuy.values/mu_Ptot,
+                                        sampled.Pmuz.values/mu_Ptot))
+
+                return sampled.PNe.values * E_muon/5000, hnl_dir, sampled.Pmue.values * E_muon/5000, mu_dir # approximation, tables are made for 5 TeV muons
+        elif mode == "decay":
+            if m_N is None:
+                Enu_lab, costheta_lab = sample_numu_from_muon_decay(E_muon)
+                azimuth = np.random.uniform(0, 2*np.pi, len(E_muon))
+                neutrino_directions = np.column_stack((np.sqrt(1 - costheta_lab**2) * np.cos(azimuth),
+                                                       np.sqrt(1 - costheta_lab**2) * np.sin(azimuth),
+                                                       costheta_lab))
+                return Enu_lab, neutrino_directions, None, None
+            else:
+                raise ValueError("decay class does not support HNL kinematics")
 
     def sample_decay_points(self, production_points, hnl_directions, decay_length):
         """
@@ -982,7 +1060,7 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
         if not valid_dets:
             continue
 
-        dir_cosine = max(mu_dir[2], 0.1)
+        dir_cosine = mu_dir[2]
         zenith_angle = np.arccos(dir_cosine)
         transmission = cherenkov_transmission(decay_altitude, zenith_angle)
 

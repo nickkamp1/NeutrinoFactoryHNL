@@ -160,23 +160,7 @@ def sigma(E_mu, m_N, U2):
         if s <= s_threshold or m_N >= sqrt_s - m_mu:
             return 0.0
     else:
-        mask = (s <= s_threshold) | (m_N >= sqrt_s - m_mu)
-
-    # Simplified phase space with polynomial suppression near edges
-    # This gives smoother behavior than Kallen function
-    x = m_N / sqrt_s  # Fractional mass
-
-    # Phase space factor that vanishes at x=0 and x~1
-    # Using (1-x^2)^n form which is common for phase space
-    phase_space = (1 - x**2)**10
-
-    # Cross section
-    sigma_val = 5e-1 * (s/320) * phase_space * U2  # in pb
-
-    if not np.isscalar(m_N):
-        sigma_val = np.where(mask, 0.0, sigma_val)
-
-    return sigma_val * picobarn_to_m2  # convert to m^2
+        return 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
 
 
 def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):

@@ -220,7 +220,7 @@ def compute_background_at_satellite(flux_geometry,
         # Time to reach z = z_int:
         t_to_z = (z_int - prod_points[idx, 2]) / nu_dirs[idx, 2]
         int_pos = prod_points[idx] + t_to_z * nu_dirs[idx]
-        int_pos_all[i_eval] = int_pos
+        int_pos_all[idx] = int_pos
 
         # --- Outgoing muon from CC interaction ---
         # Inelasticity y: dsigma/dy ~ 1 + (1-y)^2 for neutrinos

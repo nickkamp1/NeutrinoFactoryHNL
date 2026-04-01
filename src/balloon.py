@@ -465,7 +465,7 @@ class HNLFluxGeometry:
         # Convert to 3D: surface exit at origin, beam comes from -beam_dir
         s_from_exit = self.L_target - sampled_s
         production_points = np.outer(-s_from_exit, self.beam_dir)
-        return production_points, E_mu_local, N_HNLs_per_muon, s_centers
+        return production_points, N_HNLs_per_muon, s_centers, E_mu_local
 
     def sample_kinematics(self, production_depths, E_muon, m_N=None, mode="scattering"):
         """
@@ -771,15 +771,20 @@ def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
     max_det_height = max(p[2] for p in detector_positions)
 
     if use_energy_loss:
-        prod_points, N_HNLs_per_muon = \
+        prod_points, N_HNLs_per_muon, _, _ = \
             flux_geometry.sample_production_points_weighted(m_N, U2, N_samples)
     else:
         HNL_xs = sigma(E_mu, m_N, U2)
         N_HNLs_per_muon = HNL_xs * flux_geometry.L_target * n_earth_m3
         prod_points = flux_geometry.sample_production_points(N_samples)
 
-    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(N_samples, m_N=m_N)
+    E_muon_local = muon_energy_in_earth(flux_geometry.E_mu, prod_points[:,-1]+flux_geometry.L_target)
 
+    # --- 2. Sample neutrino kinematics ---
+    # Passing no m_N value uses the neutrino background MC kinematics (no HNL mass, U²=1)
+    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(
+        prod_points[:,-1], E_muon_local, m_N = m_N
+    )
     # HNL decay length (per event)
     decay_length = HNL_decay_length(m_N, U2, hnl_energy)
 

@@ -26,7 +26,7 @@ from src.xs_and_decays import sigma
 from src.cherenkov import (cherenkov_photons_detected_vectorized,
                           cherenkov_photons_multi_detector,
                           cherenkov_transmission)
-from src.balloon import air_density, muon_range_in_air, hadronic_shower_cherenkov
+from src.balloon import muon_range_in_air, hadronic_shower_cherenkov, muon_energy_in_earth
 
 
 # Neutrino interaction constants
@@ -121,7 +121,8 @@ def compute_background_at_satellite(flux_geometry,
                                     N_samples=1000,
                                     max_cherenkov_events=None,
                                     uniform_gen=False,
-                                    include_hadronic_shower=True):
+                                    include_hadronic_shower=True,
+                                    mode="scattering"):
     """
     Compute neutrino background using the same DIS framework as the HNL signal.
 
@@ -140,6 +141,12 @@ def compute_background_at_satellite(flux_geometry,
         Cap on expensive Cherenkov evaluations
     detector_positions : list of array-like
         List of 3D detector positions [m].
+    uniform_gen : bool
+        If True, sample interaction altitudes uniformly and weight by exp(-z/H).
+    include_hadronic_shower : bool
+        Whether to include hadronic shower Cherenkov contribution (adds cost)
+    mode : str
+        "scattering" (default) or "decay"
 
     Returns
     -------
@@ -160,19 +167,21 @@ def compute_background_at_satellite(flux_geometry,
     N_det = len(detector_positions)
     max_det_height = max(p[2] for p in detector_positions)
 
-    # --- 1. Neutrino production rate ---
+    # --- 1. Neutrino production rate & produciton point sampling ---
     # Same as HNL with m_N=0, U²=1: sigma(E_mu, 0, 1) integrated over depth
-    N_nu_per_muon, _, _ = \
-        flux_geometry.compute_weighted_production_rate(m_N=0.0, U2=1.0)
+    prod_points, N_nu_per_muon, _, _ = flux_geometry.sample_production_points_weighted(
+        m_N=0.0, U2=1.0, N_samples=N_samples, mode=mode
+    )
+
+    E_muon_local = muon_energy_in_earth(flux_geometry.E_mu, prod_points[:,-1]+flux_geometry.L_target)
 
     # --- 2. Sample neutrino kinematics ---
     # Passing no m_N value uses the neutrino background MC kinematics (no HNL mass, U²=1)
-    nu_energy, nu_dirs, _, _ = flux_geometry.sample_kinematics(N_samples)
-
-    # --- 3. Sample production points (weighted by local cross section) ---
-    prod_points, _ = flux_geometry.sample_production_points_weighted(
-        m_N=0.0, U2=1.0, N_samples=N_samples
+    nu_energy, nu_dirs, _, _ = flux_geometry.sample_kinematics(
+        prod_points[:,-1], E_muon_local, mode=mode
     )
+
+
 
     # --- 4. Filter upward-going neutrinos ---
     going_up = nu_dirs[:, 2] > 0
@@ -212,6 +221,8 @@ def compute_background_at_satellite(flux_geometry,
         position_weights[idx] = pos_weights_eval[i_eval]
 
     for i_eval, idx in enumerate(eval_indices):
+
+        print(f"Evaluating event {i_eval+1}/{len(eval_indices)} (index {idx})", end='\r')
         z_int = z_int_all[i_eval]
         interaction_altitudes[idx] = z_int
 
@@ -226,7 +237,7 @@ def compute_background_at_satellite(flux_geometry,
         # Inelasticity y: dsigma/dy ~ 1 + (1-y)^2 for neutrinos
         while True:
             y = np.random.uniform(0, 1)
-            if np.random.uniform(0, 2) < 1 + (1 - y)**2:
+            if np.random.uniform(0, 2) < (1 + (1 - y)**2):
                 break
 
         E_mu_out = (1 - y) * nu_energy[idx]
@@ -235,7 +246,11 @@ def compute_background_at_satellite(flux_geometry,
 
         # Muon direction: nearly collinear with neutrino at high energy
         # Characteristic scattering angle ~ m_mu / E_mu_out
-        theta_scat = min(m_mu / E_mu_out, 0.3)
+        Q2_min = m_mu**2 * y / (1 - y)
+        Q2_max = 2 * m_nucleon * nu_energy[idx] * y  # = s*y, from x_max=1
+        log_Q2 = np.random.uniform(np.log(Q2_min), np.log(Q2_max))
+        Q2 = np.exp(log_Q2)
+        theta_scat = np.sqrt(Q2) / (nu_energy[idx] * np.sqrt(1 - y))
         phi_scat = np.random.uniform(0, 2 * np.pi)
 
         # Rotate neutrino direction by small angle

@@ -25,11 +25,12 @@ from src.balloon import compute_signal_at_satellite, HNLFluxGeometry
 from src.background import compute_background_at_satellite
 
 # --- Grid parameters ---
-MASSES = np.array([5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30, 40, 50, 60, 70, 80, 90])
+MASSES = np.array([5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30, 40, 50])#, 60, 70, 80, 90])
 U2_RANGE = np.logspace(-14, -7, 100)
-U2_BATCH_SIZE = 1
-N_SAMPLES = 500000
-N_SAMPLES_BKG = 500000
+U2_BATCH_SIZE = 5
+N_SAMPLES = 50000
+N_SAMPLES_BKG = 50000
+MODE = "scattering"
 E_MU = 5000  # GeV
 
 # Geometry
@@ -78,12 +79,14 @@ if run_bkg:
     bkg_photons, bkg_weights, N_nu_per_muon, bkg_ch_weight, bkg_positions = \
         compute_background_at_satellite(
             flux_geometry, N_samples=N_SAMPLES_BKG,
-            detector_positions=DETECTOR_POSITIONS
+            detector_positions=DETECTOR_POSITIONS,
+            uniform_gen=True,
+            mode=MODE
         )
     print(f"Background done: {time.time()-t_bkg:.1f}s")
     sys.stdout.flush()
 
-    outfile = os.path.join(outdir, "scan_background.npz")
+    outfile = os.path.join(outdir, f"scan_background_{MODE}.npz")
     np.savez(outfile,
              N_samples_bkg=N_SAMPLES_BKG,
              detector_positions=np.array(DETECTOR_POSITIONS),
@@ -124,7 +127,8 @@ else:
                 compute_signal_at_satellite(
                     m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
                     use_energy_loss=True,
-                    detector_positions=DETECTOR_POSITIONS
+                    detector_positions=DETECTOR_POSITIONS,
+                    uniform_gen=True
                 )
             photon_counts_batch[i] = ph_counts
             decay_weights_batch[i] = decay_wts

@@ -5,173 +5,9 @@ import pandas as pd
 from src.cherenkov import *
 from src.constants import *
 from src.xs_and_decays import *
-from src.flux import numu_flux
-
-# Earth radius [m]
-R_EARTH = 6.371e6
-
-def sample_numu_from_muon_decay(E_mu, P_mu=0.0):
-    """
-    Sample nu_mu energy and direction from muon decay analytically.
-
-    Samples in the muon rest frame where the distribution factorizes,
-    then boosts to the lab frame.
-
-    In the rest frame:
-        dN/(dx d(cosθ_cm)) ∝ x² [(3 - 2x) + P_mu·cosθ_cm·(1 - 2x)]
-    where x = 2E_nu_cm / m_mu ∈ [0, 1].
-
-    Parameters
-    ----------
-    E_mu : np array(float)
-        Muon energy in the lab frame [GeV]
-    P_mu : float
-        Muon polarization along the beam axis (-1 to +1). Default 0.
-
-    Returns
-    -------
-    E_nu_lab : ndarray, shape (len(E_mu),)
-        Neutrino energies in the lab frame [GeV]
-    cos_theta_lab : ndarray, shape (len(E_mu),)
-        Cosine of angle w.r.t. beam axis in the lab frame
-    """
-    gamma = E_mu / m_mu
-    beta = np.sqrt(1.0 - 1.0 / gamma**2)
-
-    # --- Step 1: sample x_cm from f(x) = x²(3-2x) via rejection ---
-    # Max of x²(3-2x) is 27/32 at x=3/4
-    f_max = 27.0 / 32.0
-    x_cm = np.empty(len(E_mu))
-    n_filled = 0
-    while n_filled < len(E_mu):
-        n_need = int(1.8 * (len(E_mu) - n_filled)) + 128  # ~59% acceptance
-        x_prop = np.random.uniform(0, 1, n_need)
-        f_val = x_prop**2 * (3.0 - 2.0 * x_prop)
-        accept = np.random.uniform(0, f_max, n_need) < f_val
-        x_accepted = x_prop[accept]
-        n_take = min(len(x_accepted), len(E_mu) - n_filled)
-        x_cm[n_filled:n_filled + n_take] = x_accepted[:n_take]
-        n_filled += n_take
-
-    # --- Step 2: sample cosθ_cm from P(c|x) = (1 + α·c)/2 on [-1,1] ---
-    # where α = P_mu·(1-2x)/(3-2x)
-    alpha = P_mu * (1.0 - 2.0 * x_cm) / (3.0 - 2.0 * x_cm)
-    u = np.random.uniform(0, 1, len(E_mu))
-
-    # Invert CDF: F(c) = (c+1)/2 + α(c²-1)/4 = u
-    # → α/4·c² + c/2 + (1/2 - α/4 - u) = 0
-    small_alpha = np.abs(alpha) < 1e-10
-    alpha_safe = np.where(small_alpha, 1.0, alpha)  # avoid division by zero
-    cos_cm = np.where(
-        small_alpha,
-        2.0 * u - 1.0,
-        (-1.0 + np.sqrt(np.maximum(1.0 + 2.0 * alpha_safe * (2.0 * u - 1.0 + alpha_safe), 0.0))) / alpha_safe
-    )
-    cos_cm = np.clip(cos_cm, -1.0, 1.0)
-
-    # --- Step 3: boost to lab frame ---
-    E_nu_cm = x_cm * m_mu / 2.0
-    E_nu_lab = gamma * E_nu_cm * (1.0 + beta * cos_cm)
-    cos_theta_lab = (cos_cm + beta) / (1.0 + beta * cos_cm)
-
-    return E_nu_lab, cos_theta_lab
-
-def mcs_angle(L,E_mu_init):
-    X0 = 26.5 # g/cm^2 for rock
-    x = L * 2.65  # g/cm^2
-    return 0.0136 * np.sqrt(x/X0) * (1 + 0.038 * np.log(x/X0)) / E_mu_init
-
-def dump_length_earth(dump_depth, dump_angle):
-    """
-    Compute beam dump path length through rock using curved-Earth geometry.
-
-    Uses the law of cosines on the triangle (Earth center, dump origin, surface exit).
-
-    Parameters
-    ----------
-    dump_depth : float
-        Depth of beam dump origin below the surface [m]
-    dump_angle : float
-        Angle of beam dump axis from vertical [rad] (0 = upgoing, pi/2 = horizontal)
-
-    Returns
-    -------
-    L : float
-        Path length through rock from dump origin to surface exit [m]
-    """
-    R = R_EARTH
-    a = 1.0
-    b = -2.0 * (R - dump_depth) * np.cos(np.pi - dump_angle)
-    c = (R - dump_depth)**2 - R**2
-    return (-b + np.sqrt(b**2 - 4 * a * c)) / (2 * a)
+from src.muon_beam_dump_helpers import *
 
 
-def decay_length_earth(dump_depth, dump_angle, balloon_height=5e3):
-    """
-    Compute atmospheric decay region length using curved-Earth geometry.
-
-    The decay region extends from the surface exit point to the point where
-    the beam axis reaches balloon_height altitude, accounting for Earth curvature.
-
-    Parameters
-    ----------
-    dump_depth : float
-        Depth of beam dump origin below the surface [m]
-    dump_angle : float
-        Angle of beam dump axis from vertical [rad]
-    balloon_height : float
-        Balloon/detector altitude [m]
-
-    Returns
-    -------
-    L : float
-        Decay region length along beam axis [m]
-    """
-    R = R_EARTH
-    L_dump = dump_length_earth(dump_depth, dump_angle)
-    a = 1.0
-    b = 2.0 * (L_dump - np.cos(np.pi - dump_angle) * (R - dump_depth))
-    c = ((R - dump_depth)**2 + L_dump**2
-         - 2.0 * L_dump * (R - dump_depth) * np.cos(np.pi - dump_angle)
-         - (R + balloon_height)**2)
-    return (-b + np.sqrt(b**2 - 4 * a * c)) / (2 * a)
-
-
-def d_max_curved_earth(cos_z, balloon_height):
-    """
-    Maximum distance a particle can travel before reaching balloon_height
-    on a curved Earth.
-
-    For a particle emitted at the surface going in direction with vertical
-    component cos_z, the altitude above the (curved) surface after distance d is:
-        h(d) = d * cos_z + d^2 * sin^2_z / (2 * R_earth)
-
-    Solves h(d) = balloon_height for d.
-
-    Parameters
-    ----------
-    cos_z : float or ndarray
-        Vertical component of particle direction (cos of zenith angle)
-    balloon_height : float
-        Target altitude [m]
-
-    Returns
-    -------
-    d_max : float or ndarray
-        Distance to reach balloon_height [m]
-    """
-    cos_z = np.asarray(cos_z, dtype=float)
-    sin2_z = 1.0 - cos_z**2
-    a = sin2_z / (2.0 * R_EARTH)
-    discriminant = cos_z**2 + 4.0 * a * balloon_height
-    # For nearly vertical (a -> 0): d = balloon_height / cos_z
-    result = np.where(
-        a < 1e-15,
-        balloon_height / np.maximum(cos_z, 1e-10),
-        (-cos_z + np.sqrt(np.maximum(discriminant, 0.0)))
-        / (2.0 * np.maximum(a, 1e-30))
-    )
-    return result
 
 
 # Realistic muon track length calculation
@@ -187,11 +23,6 @@ RHO_AIR_SEA_LEVEL = 1.225e-3            # sea level air density [g/cm³]
 # C_CH = (X_0 / ρ_0) × dN/dl_sea  [photons per (E/E_c)]
 # The density cancels: longer radiation length at altitude × lower dN/dl = const.
 C_CH = (RADIATION_LENGTH_AIR_GCM2 / (RHO_AIR_SEA_LEVEL * 100)) * get_cherenkov_yield_per_meter()
-
-HNL_MC = {}
-for mass in [5,6,7,8,9,10,12,14,16,20,25,30,40,50,60,70,80,90,95,96]:
-    filename = "data/HNL_kinematics/Momentum%2.1f.dat" % mass
-    HNL_MC[mass] = pd.read_csv(filename, sep=r'\s+')
 
 BKG_MC = pd.read_csv("data/HNL_kinematics/Momentum.dat", sep=r'\s+')
 
@@ -490,64 +321,6 @@ def position_resolution(event_pos, balloon_pos, delta_theta=0.2*np.pi/180,
     sigma_par = D**2 * delta_theta / baseline
     return sigma_perp, sigma_par
 
-def muon_energy_in_earth(E_mu_initial, depth_m, rho=2.65):
-    """
-    Compute muon energy after propagating through standard rock.
-
-    Uses the continuous energy loss approximation:
-        -dE/dx = a + b*E
-    where a ≈ 2 MeV/(g/cm²) (ionization, minimum ionizing)
-    and b ≈ 3.5e-6 (g/cm²)^-1 (radiative: bremsstrahlung + pair production).
-
-    The analytic solution is:
-        E(x) = (E_0 + a/b) * exp(-b*x) - a/b
-    where x is in g/cm².
-
-    Parameters
-    ----------
-    E_mu_initial : float or array
-        Initial muon energy [GeV]
-    depth_m : float or array
-        Depth of propagation through rock [m]
-    rho : float
-        Rock density [g/cm³] (default: 2.65 for standard rock)
-
-    Returns
-    -------
-    E_mu : float or array
-        Muon energy after traversing depth [GeV]. Clipped to 0 if muon stops.
-    """
-    a = 2.0e-3   # GeV / (g/cm²) — ionization loss
-    b = 3.5e-6   # (g/cm²)^-1 — radiative loss coefficient
-
-    # Convert depth in meters to column depth in g/cm²
-    x = depth_m * 100 * rho  # depth_m * 100 cm/m * rho g/cm³ = g/cm²
-
-    E_mu = (E_mu_initial + a / b) * np.exp(-b * x) - a / b
-    return np.maximum(E_mu, 0.0)
-
-
-def muon_critical_energy(rho=2.65):
-    """
-    Return the critical energy where radiative losses equal ionization losses.
-    E_crit = a/b ≈ 571 GeV in standard rock.
-    """
-    a = 2.0e-3
-    b = 3.5e-6
-    return a / b
-
-
-def muon_max_range_in_earth(E_mu_initial, rho=2.65):
-    """
-    Maximum range of a muon in rock before it stops [m].
-
-    From E(x) = 0: x_max = (1/b) * ln(1 + b*E_0/a)
-    """
-    a = 2.0e-3
-    b = 3.5e-6
-    x_max = np.log(1 + b * E_mu_initial / a) / b  # g/cm²
-    return x_max / (100 * rho)  # convert to meters
-
 
 class HNLFluxGeometry:
     """
@@ -609,9 +382,7 @@ class HNLFluxGeometry:
         self.hnl_mc = {}
         self.available_masses = []
         for mass in [5,6,7,8,9,10,20,30,40,50,60,70,80,90,95,96]:
-            if mass in HNL_MC:
-                self.hnl_mc[mass] = HNL_MC[mass]
-                self.available_masses.append(mass)
+            self.available_masses.append(mass)
         self.available_masses = np.array(self.available_masses)
 
     def _nearest_mc_mass(self, m_N):
@@ -696,13 +467,21 @@ class HNLFluxGeometry:
         production_points = np.outer(-s_from_exit, self.beam_dir)
         return production_points, E_mu_local, N_HNLs_per_muon, s_centers
 
-    def sample_kinematics(self, E_muon, m_N=None, mode="scattering"):
+    def sample_kinematics(self, production_depths, E_muon, m_N=None, mode="scattering"):
         """
         Sample HNL and muon kinematics from pre-computed MC data.
 
         Samples len(E_muon) events with replacement from the MC DataFrame
         for the nearest available HNL mass.
         """
+
+        # First, sample mcs directions
+
+        # Precompute once per geometry
+        s_table, theta_table = muon_mcs_table(E_mu_initial=self.E_mu, L_dump_m=self.L_target)
+
+        # For each production event at depth s_i along the dump:
+        theta_rms = get_mcs_at_depths(s_table, theta_table, production_depths)
 
         if mode == "scattering":
             if m_N is None:
@@ -712,10 +491,15 @@ class HNLFluxGeometry:
                 nu_dir = np.column_stack((sampled.Pnux.values/nu_Ptot,
                                         sampled.Pnuy.values/nu_Ptot,
                                         sampled.Pnuz.values/nu_Ptot))
+                # smear the nu direction by the MCS angle at the production depth
+                nu_dir = apply_mcs_smearing(nu_dir, theta_rms)
                 return sampled.Pnue.values * E_muon/5000, nu_dir, None, None # approximation, tables are made for 5 TeV muons
 
             else:
                 mc_mass = self._nearest_mc_mass(m_N)
+                if mc_mass not in self.hnl_mc:
+                    filename = "data/HNL_kinematics/Momentum%2.1f.dat" % mc_mass
+                    self.hnl_mc[mc_mass] = pd.read_csv(filename, sep=r'\s+')
                 df = self.hnl_mc[mc_mass]
                 sampled = df.sample(n=len(E_muon), replace=True)
 
@@ -727,7 +511,9 @@ class HNLFluxGeometry:
                 mu_dir = np.column_stack((sampled.Pmux.values/mu_Ptot,
                                         sampled.Pmuy.values/mu_Ptot,
                                         sampled.Pmuz.values/mu_Ptot))
-
+                # smear the directions by the MCS angle at the production depth
+                hnl_dir = apply_mcs_smearing(hnl_dir, theta_rms)
+                mu_dir = apply_mcs_smearing(mu_dir, theta_rms)
                 return sampled.PNe.values * E_muon/5000, hnl_dir, sampled.Pmue.values * E_muon/5000, mu_dir # approximation, tables are made for 5 TeV muons
         elif mode == "decay":
             if m_N is None:
@@ -736,6 +522,8 @@ class HNLFluxGeometry:
                 neutrino_directions = np.column_stack((np.sqrt(1 - costheta_lab**2) * np.cos(azimuth),
                                                        np.sqrt(1 - costheta_lab**2) * np.sin(azimuth),
                                                        costheta_lab))
+                # smear the neutrino direction by the MCS angle at the production depth
+                neutrino_directions = apply_mcs_smearing(neutrino_directions, theta_rms)
                 return Enu_lab, neutrino_directions, None, None
             else:
                 raise ValueError("decay class does not support HNL kinematics")

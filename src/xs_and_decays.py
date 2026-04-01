@@ -66,6 +66,72 @@ def muon_total_decay_width(m_N, Umu2, Ue2):
 
 Gamma_muon = muon_total_decay_width(0,1,0)
 
+def sample_numu_from_muon_decay(E_mu, P_mu=0.0):
+    """
+    Sample nu_mu energy and direction from muon decay analytically.
+
+    Samples in the muon rest frame where the distribution factorizes,
+    then boosts to the lab frame.
+
+    In the rest frame:
+        dN/(dx d(cosθ_cm)) ∝ x² [(3 - 2x) + P_mu·cosθ_cm·(1 - 2x)]
+    where x = 2E_nu_cm / m_mu ∈ [0, 1].
+
+    Parameters
+    ----------
+    E_mu : np array(float)
+        Muon energy in the lab frame [GeV]
+    P_mu : float
+        Muon polarization along the beam axis (-1 to +1). Default 0.
+
+    Returns
+    -------
+    E_nu_lab : ndarray, shape (len(E_mu),)
+        Neutrino energies in the lab frame [GeV]
+    cos_theta_lab : ndarray, shape (len(E_mu),)
+        Cosine of angle w.r.t. beam axis in the lab frame
+    """
+    gamma = E_mu / m_mu
+    beta = np.sqrt(1.0 - 1.0 / gamma**2)
+
+    # --- Step 1: sample x_cm from f(x) = x²(3-2x) via rejection ---
+    # Max of x²(3-2x) is 27/32 at x=3/4
+    f_max = 27.0 / 32.0
+    x_cm = np.empty(len(E_mu))
+    n_filled = 0
+    while n_filled < len(E_mu):
+        n_need = int(1.8 * (len(E_mu) - n_filled)) + 128  # ~59% acceptance
+        x_prop = np.random.uniform(0, 1, n_need)
+        f_val = x_prop**2 * (3.0 - 2.0 * x_prop)
+        accept = np.random.uniform(0, f_max, n_need) < f_val
+        x_accepted = x_prop[accept]
+        n_take = min(len(x_accepted), len(E_mu) - n_filled)
+        x_cm[n_filled:n_filled + n_take] = x_accepted[:n_take]
+        n_filled += n_take
+
+    # --- Step 2: sample cosθ_cm from P(c|x) = (1 + α·c)/2 on [-1,1] ---
+    # where α = P_mu·(1-2x)/(3-2x)
+    alpha = P_mu * (1.0 - 2.0 * x_cm) / (3.0 - 2.0 * x_cm)
+    u = np.random.uniform(0, 1, len(E_mu))
+
+    # Invert CDF: F(c) = (c+1)/2 + α(c²-1)/4 = u
+    # → α/4·c² + c/2 + (1/2 - α/4 - u) = 0
+    small_alpha = np.abs(alpha) < 1e-10
+    alpha_safe = np.where(small_alpha, 1.0, alpha)  # avoid division by zero
+    cos_cm = np.where(
+        small_alpha,
+        2.0 * u - 1.0,
+        (-1.0 + np.sqrt(np.maximum(1.0 + 2.0 * alpha_safe * (2.0 * u - 1.0 + alpha_safe), 0.0))) / alpha_safe
+    )
+    cos_cm = np.clip(cos_cm, -1.0, 1.0)
+
+    # --- Step 3: boost to lab frame ---
+    E_nu_cm = x_cm * m_mu / 2.0
+    E_nu_lab = gamma * E_nu_cm * (1.0 + beta * cos_cm)
+    cos_theta_lab = (cos_cm + beta) / (1.0 + beta * cos_cm)
+
+    return E_nu_lab, cos_theta_lab
+
 
 def HNL_decay_width(m_N, U2, d=0):
     """Calculate the decay width of a Heavy Neutral Lepton (HNL).
@@ -159,8 +225,11 @@ def sigma(E_mu, m_N, U2):
     if np.isscalar(m_N):
         if s <= s_threshold or m_N >= sqrt_s - m_mu:
             return 0.0
+        else:
+            return 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
     else:
-        return 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
+        mask = (s <= s_threshold) | (m_N >= sqrt_s - m_mu)
+        return np.where(mask, 0.0, 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2)  # in m^2, with threshold behavior
 
 
 def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):

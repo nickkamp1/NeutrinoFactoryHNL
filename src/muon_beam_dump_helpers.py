@@ -260,11 +260,11 @@ def apply_mcs_smearing(directions, theta_rms):
     smeared_directions : ndarray, shape (N, 3)
         Smeared unit direction vectors
     """
+    N = len(directions)
+    theta_rms = np.atleast_1d(np.asarray(theta_rms, dtype=float))
     # MCS is Gaussian in two projected planes: theta_x and theta_y
-    # theta_x = np.random.normal(0, theta_rms)
-    # theta_y = np.random.normal(0, theta_rms)
-    theta_total = np.random.normal(0, theta_rms)#np.sqrt(theta_x**2 + theta_y**2)
-    phi_scat = np.random.uniform(0,2*np.pi)#np.arctan2(theta_y, theta_x)
+    theta_total = np.abs(np.random.normal(0, theta_rms, N))
+    phi_scat = np.random.uniform(0, 2*np.pi, N)
 
     # Build perpendicular basis for each direction
     d = directions
@@ -290,3 +290,84 @@ def apply_mcs_smearing(directions, theta_rms):
     smeared = smeared / np.linalg.norm(smeared, axis=1, keepdims=True)
 
     return smeared
+
+
+def rotate_frame(directions, new_z):
+    """
+    Rotate direction vectors from the z-axis frame into a new frame.
+
+    Given directions defined relative to [0,0,1] (e.g. from MC or from
+    muon decay sampling), rotate each one so that [0,0,1] maps to new_z.
+    This is the correct way to apply MCS: the muon direction is deflected
+    to new_z by MCS, and all products (HNL, neutrino, outgoing muon) that
+    were sampled relative to [0,0,1] must be rotated by the same rotation.
+
+    Parameters
+    ----------
+    directions : ndarray, shape (N, 3)
+        Unit direction vectors in the z-axis frame
+    new_z : ndarray, shape (N, 3)
+        The new z-axis for each event (e.g. smeared muon directions)
+
+    Returns
+    -------
+    rotated : ndarray, shape (N, 3)
+        Direction vectors rotated into the new frame
+    """
+    N = len(directions)
+    d = directions
+    nz = new_z
+
+    # For each event, build rotation matrix R that maps [0,0,1] -> new_z
+    # Using Rodrigues' formula: R = I + [k]_x sin(theta) + [k]_x^2 (1-cos(theta))
+    # where k = z_hat x new_z / |z_hat x new_z|, theta = arccos(new_z · z_hat)
+
+    cos_theta = nz[:, 2]  # new_z dot [0,0,1]
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+
+    # Cross product [0,0,1] x new_z = [-new_z_y, new_z_x, 0]
+    kx = -nz[:, 1]
+    ky = nz[:, 0]
+    # kz = 0
+    k_norm = np.sqrt(kx**2 + ky**2)
+
+    # Handle the degenerate case: new_z ≈ [0,0,±1]
+    small = k_norm < 1e-10
+
+    # For non-degenerate cases, normalize k
+    k_norm_safe = np.where(small, 1.0, k_norm)
+    kx_n = kx / k_norm_safe
+    ky_n = ky / k_norm_safe
+
+    sin_theta = k_norm  # |z x nz| = sin(angle between them)
+
+    # Apply Rodrigues: v_rot = v cos(t) + (k x v) sin(t) + k (k·v)(1-cos(t))
+    # k = [kx_n, ky_n, 0]
+    # k x d = [ky_n*d_z, -kx_n*d_z, kx_n*d_y - ky_n*d_x]
+    # k · d = kx_n*d_x + ky_n*d_y
+    cross_x = ky_n * d[:, 2]
+    cross_y = -kx_n * d[:, 2]
+    cross_z = kx_n * d[:, 1] - ky_n * d[:, 0]
+
+    k_dot_d = kx_n * d[:, 0] + ky_n * d[:, 1]
+
+    ct = cos_theta
+    st = sin_theta
+
+    rot_x = d[:, 0] * ct + cross_x * st + kx_n * k_dot_d * (1 - ct)
+    rot_y = d[:, 1] * ct + cross_y * st + ky_n * k_dot_d * (1 - ct)
+    rot_z = d[:, 2] * ct + cross_z * st + 0.0  # kz=0, so kz*k_dot_d = 0
+
+    rotated = np.column_stack([rot_x, rot_y, rot_z])
+
+    # For degenerate cases: new_z ≈ [0,0,1] → identity, new_z ≈ [0,0,-1] → flip
+    rotated[small] = np.where(
+        cos_theta[small, np.newaxis] > 0,
+        d[small],           # new_z ≈ +z, no rotation needed
+        -d[small]           # new_z ≈ -z, flip (shouldn't happen in practice)
+    )
+
+    # Re-normalize
+    rotated = rotated / np.linalg.norm(rotated, axis=1, keepdims=True)
+
+    return rotated

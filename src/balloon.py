@@ -527,7 +527,7 @@ class HNLFluxGeometry:
                                                        np.sqrt(1 - costheta_lab**2) * np.sin(azimuth),
                                                        costheta_lab))
                 # smear the neutrino direction by the MCS angle at the production depth
-                neutrino_directions = apply_mcs_smearing(neutrino_directions, theta_rms)
+                neutrino_directions = rotate_frame(neutrino_directions, muon_dirs)
                 return Enu_lab, neutrino_directions, None, None
             else:
                 raise ValueError("decay class does not support HNL kinematics")

@@ -25,11 +25,11 @@ from src.balloon import compute_signal_at_satellite, HNLFluxGeometry
 from src.background import compute_background_at_satellite
 
 # --- Grid parameters ---
-MASSES = np.array([5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30, 40, 50])#, 60, 70, 80, 90])
+MASSES = np.array([5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30, 40, 50, 60, 70])#, 80, 90])
 U2_RANGE = np.logspace(-14, -7, 100)
-U2_BATCH_SIZE = 5
-N_SAMPLES = 50000
-N_SAMPLES_BKG = 50000
+U2_BATCH_SIZE = 1
+N_SAMPLES = 500000
+N_SAMPLES_BKG = 500000
 MODE = "scattering"
 E_MU = 5000  # GeV
 

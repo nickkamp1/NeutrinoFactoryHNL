@@ -429,7 +429,7 @@ class HNLFluxGeometry:
             position_weights = decay_coefficient_local * ds
 
         # Integrated production rate: N = sum(decay or scattering length * ds)
-        N_HNLs_per_muon = np.sum(position_weights * ds)
+        interaction_probability = np.sum(position_weights * ds)
 
         total = np.sum(position_weights)
         if total > 0:
@@ -437,7 +437,7 @@ class HNLFluxGeometry:
         else:
             position_weights = np.ones(N_depth_bins) / N_depth_bins
 
-        return N_HNLs_per_muon, s_centers, position_weights, E_mu_local
+        return interaction_probability, s_centers, position_weights, E_mu_local
 
     def sample_production_points_weighted(self, m_N, U2, N_samples, N_depth_bins=100, mode="scattering"):
         """
@@ -540,6 +540,201 @@ class HNLFluxGeometry:
         travel_distances = np.random.exponential(decay_length, N)
         decay_points = production_points + travel_distances[:, np.newaxis] * hnl_directions
         return decay_points, travel_distances
+
+
+    def compute_signal_at_satellite(self, m_N, U2,
+                                    detector_positions,
+                                    N_samples=1000, use_energy_loss=True,
+                                    include_hadronic_shower=True,
+                                    max_cherenkov_events=None,
+                                    uniform_gen=False):
+        """
+        Compute expected signal at one or more detector positions from HNL decays.
+
+        The signal model is N → μ + hadronic shower (dominant CC channel for
+        m_N > 1 GeV).  The muon kinematics come from pre-computed MC data;
+        the hadronic energy is E_had = E_HNL - E_muon, with direction from
+        momentum conservation.
+
+        Each HNL is simulated out to d_max (distance to the highest detector)
+        and assigned a decay_weight = 1 - exp(-d_max / L_decay), the probability
+        to decay within the observable volume.
+
+        Parameters
+        ----------
+        m_N : float
+            HNL mass [GeV]
+        U2 : float
+            Mixing parameter squared (total)
+        N_samples : int
+            Number of MC samples
+        use_energy_loss : bool
+            If True, account for muon energy loss in Earth and weight production
+            by local cross section.
+        include_hadronic_shower : bool
+            If True, include Cherenkov from the hadronic shower in addition to
+            the muon.  The shower is modeled with EM-fraction scaling and
+            multiple sub-tracks for angular spread.
+        max_cherenkov_events : int or None
+            Cap on expensive Cherenkov evaluations.  The returned cherenkov_weight
+            compensates for the subsampling.
+        detector_positions : list of array-like
+            List of 3D detector positions [m].
+
+        Returns
+        -------
+        photon_counts,
+        muon_photon_counts,
+        hadronic_photon_counts,
+        prod_points,
+        decay_points,
+        decay_probability,
+        decay_pos_probability,
+        interaction_probability,
+        cherenkov_weight
+        """
+        # Set up detector positions
+        detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
+        N_det = len(detector_positions)
+        max_det_height = max(p[2] for p in detector_positions)
+
+        if use_energy_loss:
+            prod_points, interaction_probability, _, _ = \
+                self.sample_production_points_weighted(m_N, U2, N_samples)
+        else:
+            HNL_xs = sigma(self.E_mu, m_N, U2)
+            interaction_probability = HNL_xs * self.L_target * self.n_earth_m3
+            prod_points = self.sample_production_points(N_samples)
+
+        E_muon_local = muon_energy_in_earth(self.E_mu, prod_points[:,-1]+self.L_target)
+
+        # --- 2. Sample neutrino kinematics ---
+        # Passing no m_N value uses the neutrino background MC kinematics (no HNL mass, U²=1)
+        hnl_energy, hnl_dirs, mu_energy, mu_dirs = self.sample_kinematics(
+            prod_points[:,-1], E_muon_local, m_N = m_N
+        )
+        # HNL decay length (per event)
+        decay_length = HNL_decay_length(m_N, U2, hnl_energy)
+
+        # --- Decay probability weighting (curved-Earth d_max) ---
+        cos_z = hnl_dirs[:, 2]
+        upward = cos_z > 0
+        d_max = np.where(upward, d_max_curved_earth(cos_z, max_det_height), 0.0)
+        d_max = np.maximum(d_max, 0.0)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            decay_probability = np.where(
+                d_max > 0,
+                1.0 - np.exp(-d_max / decay_length),
+                0.0
+            )
+
+        if uniform_gen:
+            decay_dist = np.random.uniform(0, d_max, N_samples)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                decay_pos_probability = np.where(
+                    decay_probability > 0,
+                    np.exp(-decay_dist / decay_length) * d_max
+                    / (decay_length * (1 - np.exp(-d_max / decay_length))),
+                    0.0
+                )
+        else:
+            u = np.random.uniform(0, 1, N_samples)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                exp_term = np.exp(-d_max / decay_length)
+                decay_dist = np.where(
+                    decay_probability > 0,
+                    -decay_length * np.log(1.0 - u * (1.0 - exp_term)),
+                    0.0
+                )
+                decay_pos_probability = np.ones_like(decay_dist)
+
+        # Compute decay points
+        decay_points = prod_points + decay_dist[:, np.newaxis] * hnl_dirs
+
+        # Filter: decays above surface
+        above_surface = decay_points[:, 2] > 0
+        valid_decay = above_surface & (decay_probability > 0)
+
+        if not np.any(valid_decay):
+            photon_counts = np.zeros((N_det, N_samples))
+            return photon_counts, decay_probability, interaction_probability, 1.0, decay_points
+
+        photon_counts = np.zeros((N_det, N_samples))
+        muon_photon_counts = np.zeros((N_det, N_samples))
+        hadronic_photon_counts = np.zeros((N_det, N_samples))
+        valid_indices = np.where(valid_decay)[0]
+        N_valid = len(valid_indices)
+
+        if max_cherenkov_events is not None and N_valid > max_cherenkov_events:
+            eval_indices = np.random.choice(valid_indices, max_cherenkov_events, replace=False)
+            cherenkov_weight = N_valid / max_cherenkov_events
+        else:
+            eval_indices = valid_indices
+            cherenkov_weight = 1.0
+
+        for idx in eval_indices:
+            decay_pos = decay_points[idx]
+            decay_altitude = max(0, decay_pos[2])
+            mu_dir = mu_dirs[idx]
+
+            if mu_dir[2] <= 0:
+                continue
+
+            # Filter detectors above the decay point
+            valid_dets = [i for i, dp in enumerate(detector_positions)
+                        if decay_pos[2] < dp[2]]
+            if not valid_dets:
+                continue
+
+            dir_cosine = mu_dir[2]
+            zenith_angle = np.arccos(dir_cosine)
+            transmission = cherenkov_transmission(decay_altitude, zenith_angle)
+
+            # --- Muon Cherenkov (computed once for all detectors) ---
+            track_length = muon_range_in_air(
+                mu_energy[idx], decay_altitude, direction_cosine=dir_cosine
+            )
+            N_track = min(1000, max(300, int(track_length / 100)))
+            valid_det_pos = [detector_positions[i] for i in valid_dets]
+            try:
+                N_ph_mu_all = cherenkov_photons_multi_detector(
+                    decay_pos, mu_dir, track_length, R_det,
+                    valid_det_pos, N_psi=300, N_track=N_track
+                )
+                N_ph_mu_all *= transmission
+            except Exception:
+                N_ph_mu_all = np.zeros(len(valid_dets))
+
+            # --- Hadronic shower Cherenkov ---
+            for j, i_det in enumerate(valid_dets):
+                N_ph_had = 0.0
+                if include_hadronic_shower:
+                    E_had = hnl_energy[idx] - mu_energy[idx]
+                    if E_had > 1.0:
+                        p_had = (hnl_energy[idx] * hnl_dirs[idx]
+                                - mu_energy[idx] * mu_dirs[idx])
+                        p_had_norm = np.linalg.norm(p_had)
+                        if p_had_norm > 0:
+                            had_dir = p_had / p_had_norm
+                            r_rel = decay_pos - detector_positions[i_det]
+                            N_ph_had = hadronic_shower_cherenkov(
+                                E_had, had_dir, r_rel, decay_altitude
+                            )
+                muon_photon_counts[i_det, idx] = N_ph_mu_all[j]
+                hadronic_photon_counts[i_det, idx] = N_ph_had
+
+        photon_counts = muon_photon_counts + hadronic_photon_counts
+        return (photon_counts,
+                muon_photon_counts,
+                hadronic_photon_counts,
+                prod_points,
+                decay_points,
+                decay_probability,
+                decay_pos_probability,
+                interaction_probability,
+                cherenkov_weight)
+
 
 
 def summarize_signal(photon_counts, N_HNLs_per_muon, N_samples, min_photons=10,
@@ -708,191 +903,15 @@ def find_sensitivity_limit(photon_counts_grid, N_HNLs_per_muon_grid,
     return None
 
 
-def compute_signal_at_satellite(m_N, E_mu, U2, flux_geometry,
-                                detector_positions,
-                                N_samples=1000, use_energy_loss=True,
-                                include_hadronic_shower=True,
-                                max_cherenkov_events=None,
-                                uniform_gen=False):
-    """
-    Compute expected signal at one or more detector positions from HNL decays.
 
-    The signal model is N → μ + hadronic shower (dominant CC channel for
-    m_N > 1 GeV).  The muon kinematics come from pre-computed MC data;
-    the hadronic energy is E_had = E_HNL - E_muon, with direction from
-    momentum conservation.
 
-    Each HNL is simulated out to d_max (distance to the highest detector)
-    and assigned a decay_weight = 1 - exp(-d_max / L_decay), the probability
-    to decay within the observable volume.
+# def reweight_signal_at_satellite(source_photon_counts, source_decay_weights,
+#                                  source_N_HNLs_per_muon, source_cherenkov_weight, source_decay_points,
+#                                  source_mN, source_U2, source_E_mu,
+#                                  target_mN, target_U2, target_E_mu,
+#                                  flux_geometry):
 
-    Parameters
-    ----------
-    m_N : float
-        HNL mass [GeV]
-    E_mu : float
-        Muon beam energy [GeV]
-    U2 : float
-        Mixing parameter squared (total)
-    flux_geometry : HNLFluxGeometry
-        Geometry configuration
-    N_samples : int
-        Number of MC samples
-    use_energy_loss : bool
-        If True, account for muon energy loss in Earth and weight production
-        by local cross section.
-    include_hadronic_shower : bool
-        If True, include Cherenkov from the hadronic shower in addition to
-        the muon.  The shower is modeled with EM-fraction scaling and
-        multiple sub-tracks for angular spread.
-    max_cherenkov_events : int or None
-        Cap on expensive Cherenkov evaluations.  The returned cherenkov_weight
-        compensates for the subsampling.
-    detector_positions : list of array-like
-        List of 3D detector positions [m].
+#     # compute the weighted production rate for target parameters
+#     target_N_HNLs_per_muon, _, _, _ = \
+#             flux_geometry.compute_weighted_production_rate(target_mN, target_U2)
 
-    Returns
-    -------
-    photon_counts : ndarray
-        Photon count per MC sample. Shape (N_samples,) for single detector,
-        or (N_det, N_samples) for multiple detectors.
-    decay_weights : ndarray, shape (N_samples,)
-        Per-event decay probability weight = 1 - exp(-d_max / L_decay).
-    N_HNLs_per_muon : float
-        Number of HNLs produced per muon.
-    cherenkov_weight : float
-        Reweight factor for subsampled Cherenkov evaluation.
-    decay_points : ndarray, shape (N_samples, 3)
-        Sampled decay positions.
-    """
-    # Set up detector positions
-    detector_positions = [np.asarray(p, dtype=float) for p in detector_positions]
-    N_det = len(detector_positions)
-    max_det_height = max(p[2] for p in detector_positions)
-
-    if use_energy_loss:
-        prod_points, N_HNLs_per_muon, _, _ = \
-            flux_geometry.sample_production_points_weighted(m_N, U2, N_samples)
-    else:
-        HNL_xs = sigma(E_mu, m_N, U2)
-        N_HNLs_per_muon = HNL_xs * flux_geometry.L_target * n_earth_m3
-        prod_points = flux_geometry.sample_production_points(N_samples)
-
-    E_muon_local = muon_energy_in_earth(flux_geometry.E_mu, prod_points[:,-1]+flux_geometry.L_target)
-
-    # --- 2. Sample neutrino kinematics ---
-    # Passing no m_N value uses the neutrino background MC kinematics (no HNL mass, U²=1)
-    hnl_energy, hnl_dirs, mu_energy, mu_dirs = flux_geometry.sample_kinematics(
-        prod_points[:,-1], E_muon_local, m_N = m_N
-    )
-    # HNL decay length (per event)
-    decay_length = HNL_decay_length(m_N, U2, hnl_energy)
-
-    # --- Decay probability weighting (curved-Earth d_max) ---
-    cos_z = hnl_dirs[:, 2]
-    upward = cos_z > 0
-    d_max = np.where(upward, d_max_curved_earth(cos_z, max_det_height), 0.0)
-    d_max = np.maximum(d_max, 0.0)
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        decay_weights = np.where(
-            d_max > 0,
-            1.0 - np.exp(-d_max / decay_length),
-            0.0
-        )
-
-    if uniform_gen:
-        decay_dist = np.random.uniform(0, d_max, N_samples)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            decay_pos_weights = np.where(
-                decay_weights > 0,
-                np.exp(-decay_dist / decay_length) * d_max
-                / (decay_length * (1 - np.exp(-d_max / decay_length))),
-                0.0
-            )
-    else:
-        u = np.random.uniform(0, 1, N_samples)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            exp_term = np.exp(-d_max / decay_length)
-            decay_dist = np.where(
-                decay_weights > 0,
-                -decay_length * np.log(1.0 - u * (1.0 - exp_term)),
-                0.0
-            )
-            decay_pos_weights = np.ones_like(decay_dist)
-
-    # Compute decay points
-    decay_points = prod_points + decay_dist[:, np.newaxis] * hnl_dirs
-
-    # Filter: decays above surface
-    above_surface = decay_points[:, 2] > 0
-    valid_decay = above_surface & (decay_weights > 0)
-
-    if not np.any(valid_decay):
-        photon_counts = np.zeros((N_det, N_samples))
-        return photon_counts, decay_weights, N_HNLs_per_muon, 1.0, decay_points
-
-    photon_counts = np.zeros((N_det, N_samples))
-    valid_indices = np.where(valid_decay)[0]
-    N_valid = len(valid_indices)
-
-    if max_cherenkov_events is not None and N_valid > max_cherenkov_events:
-        eval_indices = np.random.choice(valid_indices, max_cherenkov_events, replace=False)
-        cherenkov_weight = N_valid / max_cherenkov_events
-    else:
-        eval_indices = valid_indices
-        cherenkov_weight = 1.0
-
-    for idx in eval_indices:
-        decay_pos = decay_points[idx]
-        decay_altitude = max(0, decay_pos[2])
-        mu_dir = mu_dirs[idx]
-
-        if mu_dir[2] <= 0:
-            continue
-
-        # Filter detectors above the decay point
-        valid_dets = [i for i, dp in enumerate(detector_positions)
-                      if decay_pos[2] < dp[2]]
-        if not valid_dets:
-            continue
-
-        dir_cosine = mu_dir[2]
-        zenith_angle = np.arccos(dir_cosine)
-        transmission = cherenkov_transmission(decay_altitude, zenith_angle)
-
-        # --- Muon Cherenkov (computed once for all detectors) ---
-        track_length = muon_range_in_air(
-            mu_energy[idx], decay_altitude, direction_cosine=dir_cosine
-        )
-        N_track = min(1000, max(300, int(track_length / 100)))
-        valid_det_pos = [detector_positions[i] for i in valid_dets]
-        try:
-            N_ph_mu_all = cherenkov_photons_multi_detector(
-                decay_pos, mu_dir, track_length, R_det,
-                valid_det_pos, N_psi=300, N_track=N_track
-            )
-            N_ph_mu_all *= transmission
-        except Exception:
-            N_ph_mu_all = np.zeros(len(valid_dets))
-
-        # --- Hadronic shower Cherenkov ---
-        for j, i_det in enumerate(valid_dets):
-            N_ph_had = 0.0
-            if include_hadronic_shower:
-                E_had = hnl_energy[idx] - mu_energy[idx]
-                if E_had > 1.0:
-                    p_had = (hnl_energy[idx] * hnl_dirs[idx]
-                             - mu_energy[idx] * mu_dirs[idx])
-                    p_had_norm = np.linalg.norm(p_had)
-                    if p_had_norm > 0:
-                        had_dir = p_had / p_had_norm
-                        r_rel = decay_pos - detector_positions[i_det]
-                        N_ph_had = hadronic_shower_cherenkov(
-                            E_had, had_dir, r_rel, decay_altitude
-                        )
-
-            photon_counts[i_det, idx] = N_ph_mu_all[j] + N_ph_had
-
-    return (photon_counts, decay_weights * decay_pos_weights,
-            N_HNLs_per_muon, cherenkov_weight, decay_points)

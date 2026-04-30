@@ -21,7 +21,7 @@ os.chdir(project_root)
 
 from src.constants import *
 from src.xs_and_decays import *
-from src.balloon import compute_signal_at_satellite, HNLFluxGeometry
+from src.balloon import HNLFluxGeometry
 from src.background import compute_background_at_satellite
 
 # --- Grid parameters ---
@@ -68,7 +68,7 @@ print(f"Geometry setup: {time.time()-t0:.1f}s")
 sys.stdout.flush()
 
 # --- Output directory ---
-outdir = os.path.join(project_root, "data", "scan_results_balloon_fixed")
+outdir = os.path.join(project_root, "data", "scan_results_balloon_detailed")
 os.makedirs(outdir, exist_ok=True)
 
 if run_bkg:
@@ -115,26 +115,42 @@ else:
 
     # Signal scan over U2 batch
     photon_counts_batch = np.zeros((len(U2_batch), N_DET, N_SAMPLES))
-    decay_weights_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    muon_photon_counts_batch = np.zeros((len(U2_batch), N_DET, N_SAMPLES))
+    hadronic_photon_counts_batch = np.zeros((len(U2_batch), N_DET, N_SAMPLES))
+    production_positions_batch = np.zeros((len(U2_batch), N_SAMPLES, 3))
     decay_positions_batch = np.zeros((len(U2_batch), N_SAMPLES, 3))
-    N_HNLs_per_muon_batch = np.zeros(len(U2_batch))
+    decay_probability_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    decay_pos_probability_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    interaction_probability_batch = np.zeros(len(U2_batch))
     cherenkov_weights_batch = np.ones(len(U2_batch))
 
     for i, U2 in enumerate(U2_batch):
         t1 = time.time()
         try:
-            ph_counts, decay_wts, n_hnl, ch_weight, decay_pts = \
-                compute_signal_at_satellite(
-                    m_N, E_MU, U2, flux_geometry, N_samples=N_SAMPLES,
+            (photon_counts,
+            muon_photon_counts,
+            hadronic_photon_counts,
+            prod_points,
+            decay_points,
+            decay_probability,
+            decay_pos_probability,
+            interaction_probability,
+            cherenkov_weight) = \
+                flux_geometry.compute_signal_at_satellite(
+                    m_N, U2, N_samples=N_SAMPLES,
                     use_energy_loss=True,
                     detector_positions=DETECTOR_POSITIONS,
                     uniform_gen=True
                 )
-            photon_counts_batch[i] = ph_counts
-            decay_weights_batch[i] = decay_wts
-            decay_positions_batch[i] = decay_pts
-            N_HNLs_per_muon_batch[i] = n_hnl
-            cherenkov_weights_batch[i] = ch_weight
+            photon_counts_batch[i] = photon_counts
+            muon_photon_counts_batch[i] = muon_photon_counts
+            hadronic_photon_counts_batch[i] = hadronic_photon_counts
+            production_positions_batch[i] = prod_points
+            decay_positions_batch[i] = decay_points
+            decay_probability_batch[i] = decay_probability
+            decay_pos_probability_batch[i] = decay_pos_probability
+            interaction_probability_batch[i] = interaction_probability
+            cherenkov_weights_batch[i] = cherenkov_weight
         except Exception as e:
             print(f"  WARNING: U2={U2:.2e} failed: {e}")
 
@@ -153,11 +169,16 @@ else:
              U2_range_full=U2_RANGE,
              N_samples=N_SAMPLES,
              detector_positions=np.array(DETECTOR_POSITIONS),
-             photon_counts=photon_counts_batch,
-             decay_weights=decay_weights_batch,
-             decay_positions=decay_positions_batch,
-             N_HNLs_per_muon=N_HNLs_per_muon_batch,
-             cherenkov_weights=cherenkov_weights_batch)
+             photon_counts = photon_counts_batch,
+             muon_photon_counts = muon_photon_counts_batch,
+             hadronic_photon_counts = hadronic_photon_counts_batch,
+             production_positions = production_positions_batch,
+             decay_positions = decay_positions_batch,
+             decay_probability = decay_probability_batch,
+             decay_pos_probability = decay_pos_probability_batch,
+             interaction_probability = interaction_probability_batch,
+             cherenkov_weights = cherenkov_weights_batch
+            )
     print(f"Done! Saved to {outfile}")
 
 print(f"Total time: {time.time()-t0:.1f}s")

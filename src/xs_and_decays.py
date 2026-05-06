@@ -221,15 +221,17 @@ def sigma(E_mu, m_N, U2):
     # Use a form that transitions more smoothly near kinematic limits
     s_threshold = (m_N + m_mu)**2
 
+    xs_at_1_GeV = 0.67e-42
+
     # Basic threshold factor
     if np.isscalar(m_N):
         if s <= s_threshold or m_N >= sqrt_s - m_mu:
             return 0.0
         else:
-            return 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
+            return xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
     else:
         mask = (s <= s_threshold) | (m_N >= sqrt_s - m_mu)
-        return np.where(mask, 0.0, 0.67e-42 * E_mu * U2 * (1 - m_N**2/s)**2)  # in m^2, with threshold behavior
+        return np.where(mask, 0.0, xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2)  # in m^2, with threshold behavior
 
 
 def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):

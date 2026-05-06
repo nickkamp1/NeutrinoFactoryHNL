@@ -658,7 +658,10 @@ class HNLFluxGeometry:
 
         if not np.any(valid_decay):
             photon_counts = np.zeros((N_det, N_samples))
-            return photon_counts, decay_probability, interaction_probability, 1.0, decay_points
+            return (photon_counts, photon_counts.copy(), photon_counts.copy(),
+                    prod_points, decay_points, decay_probability,
+                    decay_pos_probability, interaction_probability, 1.0,
+                    hnl_energy, decay_dist, decay_length, d_max)
 
         photon_counts = np.zeros((N_det, N_samples))
         muon_photon_counts = np.zeros((N_det, N_samples))
@@ -733,7 +736,106 @@ class HNLFluxGeometry:
                 decay_probability,
                 decay_pos_probability,
                 interaction_probability,
-                cherenkov_weight)
+                cherenkov_weight,
+                hnl_energy,
+                decay_dist,
+                decay_length,
+                d_max)
+
+    def compute_reweighted_signal_at_satellite(self, m_N, U2,
+                                                hnl_energy, decay_dist,
+                                                decay_length_ref, d_max,
+                                                uniform_gen,
+                                                use_energy_loss=True):
+        """
+        Reweight a reference signal simulation to a new (m_N, U2) point.
+
+        Approximation: HNL kinematics and the Cherenkov photon counts per
+        event are taken to be unchanged from the reference simulation. Exact
+        when only U2 changes; a good approximation at low HNL mass, where the
+        dominant dependence is through the decay length.
+
+        Parameters
+        ----------
+        m_N, U2 : float
+            New point in parameter space.
+        hnl_energy, decay_dist, decay_length_ref, d_max : array, shape (N,)
+            Per-event reference arrays from compute_signal_at_satellite (or
+            loaded from the saved npz).
+        uniform_gen : bool
+            Whether the reference decay distances were drawn uniformly on
+            (0, d_max) (True) or from a truncated exponential with
+            decay_length_ref (False).
+        use_energy_loss : bool
+            Match the reference simulation's production-rate setting.
+
+        Returns
+        -------
+        decay_probability_new : array, shape (N,)
+        decay_pos_probability_new : array, shape (N,)
+        interaction_probability_new : float
+        decay_length_new : array, shape (N,)
+        """
+        hnl_energy = np.asarray(hnl_energy)
+        decay_dist = np.asarray(decay_dist)
+        decay_length_ref = np.asarray(decay_length_ref)
+        d_max = np.asarray(d_max)
+
+        if use_energy_loss:
+            interaction_probability_new, _, _, _ = \
+                self.compute_weighted_production_rate(m_N, U2)
+        else:
+            HNL_xs = sigma(self.E_mu, m_N, U2)
+            interaction_probability_new = HNL_xs * self.L_target * n_earth_m3
+
+        decay_length_new = HNL_decay_length(m_N, U2, hnl_energy)
+
+        valid = (d_max > 0) & (decay_length_ref > 0) & (decay_length_new > 0)
+
+        with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+            decay_probability_new = np.where(
+                valid,
+                1.0 - np.exp(-d_max / decay_length_new),
+                0.0,
+            )
+
+            if uniform_gen:
+                # decay_pos_probability already encodes the truncated-exp pdf
+                # times d_max; re-evaluate at the new decay length.
+                decay_pos_probability_new = np.where(
+                    valid & (decay_probability_new > 0),
+                    np.exp(-decay_dist / decay_length_new) * d_max
+                    / (decay_length_new
+                       * (1.0 - np.exp(-d_max / decay_length_new))),
+                    0.0,
+                )
+            else:
+                # Truncated-exponential reference: decay_pos_probability = 1
+                # and the (1 - exp(-d_max/L_ref)) factor sat in
+                # decay_probability. Set decay_probability_new to
+                # (1 - exp(-d_max/L_new)) and absorb the importance ratio
+                # p_new(d)/p_old(d) into decay_pos_probability_new.
+                ratio_num = np.exp(-decay_dist / decay_length_new) / decay_length_new
+                ratio_den = np.exp(-decay_dist / decay_length_ref) / decay_length_ref
+                trunc_ref = 1.0 - np.exp(-d_max / decay_length_ref)
+                trunc_new = 1.0 - np.exp(-d_max / decay_length_new)
+                decay_pos_probability_new = np.where(
+                    valid & (trunc_new > 0) & (ratio_den > 0),
+                    (ratio_num / ratio_den) * (trunc_ref / trunc_new),
+                    0.0,
+                )
+
+        decay_pos_probability_new = np.nan_to_num(
+            decay_pos_probability_new, nan=0.0, posinf=0.0, neginf=0.0
+        )
+        decay_probability_new = np.nan_to_num(
+            decay_probability_new, nan=0.0, posinf=0.0, neginf=0.0
+        )
+
+        return (decay_probability_new,
+                decay_pos_probability_new,
+                interaction_probability_new,
+                decay_length_new)
 
 
 

@@ -123,6 +123,10 @@ else:
     decay_pos_probability_batch = np.zeros((len(U2_batch), N_SAMPLES))
     interaction_probability_batch = np.zeros(len(U2_batch))
     cherenkov_weights_batch = np.ones(len(U2_batch))
+    hnl_energy_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    decay_dist_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    decay_length_batch = np.zeros((len(U2_batch), N_SAMPLES))
+    d_max_batch = np.zeros((len(U2_batch), N_SAMPLES))
 
     for i, U2 in enumerate(U2_batch):
         t1 = time.time()
@@ -135,7 +139,11 @@ else:
             decay_probability,
             decay_pos_probability,
             interaction_probability,
-            cherenkov_weight) = \
+            cherenkov_weight,
+            hnl_energy,
+            decay_dist,
+            decay_length,
+            d_max) = \
                 flux_geometry.compute_signal_at_satellite(
                     m_N, U2, N_samples=N_SAMPLES,
                     use_energy_loss=True,
@@ -151,6 +159,10 @@ else:
             decay_pos_probability_batch[i] = decay_pos_probability
             interaction_probability_batch[i] = interaction_probability
             cherenkov_weights_batch[i] = cherenkov_weight
+            hnl_energy_batch[i] = hnl_energy
+            decay_dist_batch[i] = decay_dist
+            decay_length_batch[i] = decay_length
+            d_max_batch[i] = d_max
         except Exception as e:
             print(f"  WARNING: U2={U2:.2e} failed: {e}")
 
@@ -177,7 +189,12 @@ else:
              decay_probability = decay_probability_batch,
              decay_pos_probability = decay_pos_probability_batch,
              interaction_probability = interaction_probability_batch,
-             cherenkov_weights = cherenkov_weights_batch
+             cherenkov_weights = cherenkov_weights_batch,
+             hnl_energy = hnl_energy_batch,
+             decay_dist = decay_dist_batch,
+             decay_length = decay_length_batch,
+             d_max = d_max_batch,
+             uniform_gen = True,
             )
     print(f"Done! Saved to {outfile}")
 

@@ -53,7 +53,6 @@ Thumbs.db
 .claude/
 
 data/HNL_kinematics
-Figures
 cluster/logs
 data/scan_results*
 data/scan_results

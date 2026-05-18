@@ -4,7 +4,7 @@ import numpy as np
 
 
 N_muon_decays = 1e22 # typical # of muon decays in 10 years at a neutrino factory
-E_muon = 25. # muon energy in GeV
+E_muon = 10 # muon energy in GeV
 
 
 det_min_baseline = 0 # average detector baseline in meters

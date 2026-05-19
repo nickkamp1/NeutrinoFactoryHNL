@@ -205,10 +205,11 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
 
     r = m_e/m_N
     a = 1 - r**2
-    L = (2 - (r**6)/8) * np.cosh(r) - (24 - 10*r**2 + r**4) / 8 * np.sqrt(1 - 4*r**2)
-    L = np.where(r > 0.1, a**3 * np.sqrt(1 - 4*r**2)*(1./2. + r**2), L)
-    L = np.where(r < 1e-1, 2*np.log(1/r) - 3, L)
+    L = (2 - r**6/8) * np.arccosh(1/(2*r)) - (24 - 10*r**2 + r**4)/8 * np.sqrt(1 - 4*r**2)
+    #L = np.where(r > 0.01, a**3 * np.sqrt(1 - 4*r**2)*(1./2. + r**2), L)
+    #L = np.where(r < 0.01, 2*np.log(1/r) - 3, L)
     L = np.where(2*r > 1, 0, L)
+    L = np.where(L<0, 0, L)
     magnetic_gamma = alpha*d**2 * m_N**3 / (12 * np.pi) * L
     return mixing_gamma + magnetic_gamma
 

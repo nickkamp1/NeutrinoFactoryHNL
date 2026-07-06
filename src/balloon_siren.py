@@ -88,8 +88,8 @@ class SIRENDimuonGeometry(HNLFluxGeometry):
 
         rec = dataclasses.InteractionRecord()
         rec.signature = dimuon_sig
-        w_mumu = decay.TotalDecayWidthForFinalState(rec)
-        w_tot = decay.TotalDecayWidth(PT.N4)
+        w_mumu = decay.TotalDecayWidth(rec)
+        w_tot = decay.TotalDecayWidthAllFinalStates(rec)
         BR_mumu = w_mumu / w_tot if w_tot > 0 else 0.0
 
         self._decay_cache[m_N] = (decay, dimuon_sig, BR_mumu)

@@ -62,3 +62,5 @@ notes/*.log
 notes/*.out
 notes/*.pdf
 notes/*.toc
+
+madgraph_xs

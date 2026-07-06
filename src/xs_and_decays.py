@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import quad
 from src.constants import *
+from src.hnl_xs_table import HNLCrossSection as _HNLXS
 
 
 def muon_differential_decay_width(E_N, m_N, Umu2, Ue2):
@@ -213,26 +214,49 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
     magnetic_gamma = alpha*d**2 * m_N**3 / (12 * np.pi) * L
     return mixing_gamma + magnetic_gamma
 
-# cross section for mu nucleon to HNL nucleon
+# ═══════════════════════════════════════════════════════════════════
+# mu- N -> HNL X production cross section
+# ═══════════════════════════════════════════════════════════════════
+# Interpolated from a MadGraph5 + CT18NNLO scan (Majorana HNL, isoscalar
+# Earth-like target, U_mu^2 = 1) tabulated in data/HNL_xs_2D_majorana.txt.
+# Interpolation is done in (log10 E_mu, r = m_N^2/s) of log10(sigma); the cross
+# section scales linearly with the mixing U2. See madgraph_xs/ for the full
+# generation pipeline, validation against colleague data, and README.
+_hnl_xs_table = None
+
 def sigma(E_mu, m_N, U2):
+    """mu- N -> HNL X cross section [m^2] on an isoscalar (Earth-like) target.
+
+    E_mu, m_N : scalar or broadcastable arrays [GeV]; U2 : muon mixing (linear).
+    Returns a float for scalar inputs, else an ndarray. Zero below the DIS
+    threshold sqrt(s) = sqrt(2 m_p E + m_p^2).
+    """
+    global _hnl_xs_table
+    if _hnl_xs_table is None:
+        _hnl_xs_table = _HNLXS()
+    return _hnl_xs_table.sigma(E_mu, m_N, U2)
+
+
+def sigma_analytic(E_mu, m_N, U2):
+    """DEPRECATED crude analytic form -- kept only for reference/comparison.
+
+    Treats the nucleon as a single parton, giving a (1 - m_N^2/s)^2 suppression
+    that is far too shallow: it overshoots the true (MadGraph+CT18NNLO) cross
+    section by ~2.5x at low mass and by up to ~5 orders of magnitude in the
+    high-mass tail. Do NOT use for physics results -- use sigma() instead.
+    """
     s = 2 * m_nucleon * E_mu  # COM energy squared, nucleon at rest
     sqrt_s = np.sqrt(s)
-
-    # Threshold behavior with smoothing
-    # Use a form that transitions more smoothly near kinematic limits
     s_threshold = (m_N + m_mu)**2
-
     xs_at_1_GeV = 0.67e-42
-
-    # Basic threshold factor
     if np.isscalar(m_N):
         if s <= s_threshold or m_N >= sqrt_s - m_mu:
             return 0.0
         else:
-            return xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2  # in m^2, with threshold behavior
+            return xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2  # m^2
     else:
         mask = (s <= s_threshold) | (m_N >= sqrt_s - m_mu)
-        return np.where(mask, 0.0, xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2)  # in m^2, with threshold behavior
+        return np.where(mask, 0.0, xs_at_1_GeV * E_mu * U2 * (1 - m_N**2/s)**2)  # m^2
 
 
 def expected_HNL_events(m_N, Umu2, Ue2, d = 0, det_eff = 1):

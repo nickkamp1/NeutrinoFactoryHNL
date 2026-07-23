@@ -328,18 +328,32 @@ class SIRENDimuonGeometry(HNLFluxGeometry):
 
 
 # ---------------------------------------------------------------------- #
-# Photon -> photoelectron threshold (informed by TRINITY, arXiv:1811.09287
+# Photon -> photoelectron threshold (informed by TRINITY, arXiv:1811.09287,
 # and the Trinity Demonstrator papers 2503.11864 / 2406.08274).
 #
-# SiPM camera: ~0.3 deg/pixel, NSB ~200 MHz/pixel, per-pixel noise ~1.9 PE RMS,
-# single-pixel discriminator ~5-6 PE, trigger ~3 nearest-neighbour pixels in a
-# few-ns gate => effective cluster threshold ~10-15 photoelectrons.  The dimuon
-# final state is strongly boosted/collinear, so its Cherenkov light clusters in
-# pixels and time, favouring such a coincidence trigger.
+# SiPM camera (Trinity design): 0.3 deg/pixel (the Demonstrator achieved 0.24),
+# NSB ~200 MHz/pixel (5 MHz/mm^2 x ~39 mm^2 SiPM), per-pixel signal-fluctuation
+# noise 1.9 PE RMS for above-horizon pixels (Demonstrator, on the ~30 ns
+# shaped-signal gate).  The Demonstrator triggers on a SINGLE pixel above
+# threshold; its stable dark-night operating point is 20 PE (150 DAC, <0.5 Hz
+# accidental rate) -- NOT a nearest-neighbour cluster trigger.
+#
+# Each muon of the dimuon pair images to essentially a single pixel: ray-tracing
+# the Cherenkov photons that reach the 2 m disk gives an image RMS ~0.007 deg,
+# ~40x smaller than a pixel (decay altitudes 10-90 km).  So the total disk photon
+# count PER MUON is a good proxy for that muon's peak-pixel count, and the
+# per-pixel PE threshold is applied per muon (see run_dimuon_scan).  The two
+# muons are usually in DIFFERENT pixels (lab opening angle ~m_N/E_N: median
+# ~0.2 deg at m_N=5 GeV rising to ~2 deg at 70 GeV), so they are treated
+# separately rather than summed.
+#
+# Default threshold = 20 PE to match the Demonstrator's demonstrated operating
+# point; 12 PE (~6 sigma over the 1.9 PE noise) is a more optimistic alternative
+# -- pass min_photoelectrons=12 to run it as a systematic.
 # ---------------------------------------------------------------------- #
-SIPM_PDE = 0.40            # SiPM photon detection efficiency
-MIN_PHOTOELECTRONS = 12.0  # effective clustered PE threshold
-MIN_PHOTONS_DEFAULT = MIN_PHOTOELECTRONS / SIPM_PDE  # threshold in raw photons (~30)
+SIPM_PDE = 0.40             # SiPM photon detection efficiency (band-averaged, 300-1000 nm)
+MIN_PHOTOELECTRONS = 20.0   # single-pixel PE threshold (Trinity Demonstrator operating point)
+MIN_PHOTONS_DEFAULT = MIN_PHOTOELECTRONS / SIPM_PDE  # threshold in raw photons (~50)
 
 
 def run_dimuon_scan(geom, masses, U2_grid, detector_positions,
@@ -361,7 +375,8 @@ def run_dimuon_scan(geom, masses, U2_grid, detector_positions,
     detector_positions : list of array-like
         Detector positions [m].
     min_photoelectrons : float
-        Clustered-PE detection threshold (default ~12, TRINITY-informed).
+        Single-pixel PE detection threshold (default 20, the Trinity
+        Demonstrator operating point; pass 12 for the optimistic case).
     pde : float
         SiPM photon detection efficiency used to convert the raw photon counts
         from the Cherenkov calculation into photoelectrons.
@@ -384,16 +399,20 @@ def run_dimuon_scan(geom, masses, U2_grid, detector_positions,
                 m_N, U2, detector_positions,
                 N_samples=N_samples,
                 max_cherenkov_events=max_cherenkov_events)
-            (photon_counts, _muon_sum, mu_photon_counts, _had, _prod, _decay,
+            (_photon_sum, _muon_sum, mu_photon_counts, _had, _prod, _decay,
              decay_probability, _decay_pos, interaction_probability,
              cherenkov_weight, *_rest) = out
             BR_mumu = out[-1]
 
             N_HNLs_eff = interaction_probability * BR_mumu
 
-            # Single-muon tag: total muon photons on each detector >= threshold.
+            # Single-muon tag: >=1 muon above threshold in ITS OWN pixel.  Each
+            # muon images to ~one pixel (image RMS ~0.007 deg << 0.3 deg pixel)
+            # and the two muons usually land in different pixels, so the correct
+            # per-pixel quantity is the brighter muon, not the summed disk count.
+            single_muon_max = np.maximum(mu_photon_counts[0], mu_photon_counts[1])
             eff, mean_ph, n_evt = summarize_signal(
-                photon_counts, N_HNLs_eff, N_samples,
+                single_muon_max, N_HNLs_eff, N_samples,
                 min_photons=min_photons,
                 cherenkov_weight=cherenkov_weight,
                 decay_weights=decay_probability)

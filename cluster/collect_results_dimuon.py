@@ -71,7 +71,7 @@ def load_raw_results(scan_dir="data/scan_results_balloon_dimuon"):
     missing_array_ids = []
 
     for i_m, m_N in enumerate(MASSES):
-        ph = np.zeros((len(U2_RANGE), N_samples))         # single-tag metric: max_det(sum of both muons)
+        ph = np.zeros((len(U2_RANGE), N_samples))         # single-tag metric: max_det(brighter muon)
         both = np.zeros((len(U2_RANGE), N_samples))       # both-tag metric: max_det(min(mu1,mu2))
         decay_pos = np.zeros((len(U2_RANGE), N_samples, 3))
         prod_pos = np.zeros((len(U2_RANGE), N_samples, 3))
@@ -89,14 +89,17 @@ def load_raw_results(scan_dir="data/scan_results_balloon_dimuon"):
                 continue
             data = np.load(fpath)
             s, e = int(data["u2_start"]), int(data["u2_end"])
-            # Single-tag: total muon photons on the most-illuminated detector.
-            pc = data["photon_counts"]            # (batch, N_det, N_samples)
-            n_det = pc.shape[1]
-            ph[s:e] = pc.max(axis=1)
+            mpc = data["mu_photon_counts"]        # (batch, 2, N_det, N_samples)
+            n_det = mpc.shape[2]
+            # Single-tag: brighter of the two muons on the most-illuminated
+            # detector.  Each muon images to ~one pixel and the two muons usually
+            # fall in DIFFERENT pixels, so the per-pixel quantity is the brighter
+            # muon, not the summed disk count (data["photon_counts"]).
+            brighter = mpc.max(axis=1)            # (batch, N_det, N_samples): brighter muon per det
+            ph[s:e] = brighter.max(axis=1)        # best detector
             # Both-tag (background-free): require BOTH muons above threshold on the
             # SAME detector.  Reduce to a per-event metric = max_det( min(mu1,mu2) ),
             # so both-tag at threshold T  <=>  metric >= T.
-            mpc = data["mu_photon_counts"]        # (batch, 2, N_det, N_samples)
             weaker = mpc.min(axis=1)              # (batch, N_det, N_samples): weaker muon per det
             both[s:e] = weaker.max(axis=1)        # best detector
             decay_pos[s:e] = data["decay_positions"]
@@ -156,7 +159,10 @@ def apply_cuts(raw, U2_range, N_samples, min_photons, max_transverse=None):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--min-pe", type=float, default=12.0)
+    p.add_argument("--min-pe", type=float, default=20.0,
+                   help="Single-pixel PE threshold (default 20, Trinity "
+                        "Demonstrator operating point; use 12 for the "
+                        "optimistic case).")
     p.add_argument("--pde", type=float, default=0.40)
     p.add_argument("--max-transverse", type=float, default=None,
                    help="Transverse-distance cut from the beamline [m] (the discriminator).")

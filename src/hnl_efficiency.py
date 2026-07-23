@@ -549,7 +549,7 @@ def plot_efficiency(result, quantity="events", masses=None, u2min=None, u2max=No
     colors = _mass_colors(ms)
 
     if ax is None:
-        fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
+        fig, ax = plt.subplots(1, 2, figsize=(11, 4.2), sharey=True)
     else:
         fig = ax[0].figure
 
@@ -566,13 +566,16 @@ def plot_efficiency(result, quantity="events", masses=None, u2min=None, u2max=No
             ax[1].step(bx, _y_from(tb[it], cb, quantity), where="mid",
                        color=colors[m], ls=ls)
 
-    ylabel = ("expected tagged events / bin" if quantity == "events"
-              else "tagging efficiency")
+    ax[0].set_ylabel("expected tagged events / bin" if quantity == "events"
+                     else "dimuon tagging efficiency")
     ax[0].set_xlabel("decay-to-detector distance [km]")
-    ax[1].set_xlabel("HNL impact parameter to detector [m]")
+    ax[1].set_xlabel("HNL impact parameter [m]")
+    ax[0].set_xlim(result.dist_edges[0]*1e-3, result.dist_edges[-1]*1e-3)
+    ax[1].set_xlim(result.b_edges[0], result.b_edges[-1])
     for a in ax:
-        a.set_ylabel(ylabel)
         a.set_yscale("log")
+        if quantity == "efficiency":
+            a.set_ylim(1e-6, 1)
 
     # two legends: color = HNL mass (left panel), linestyle = threshold (right)
     ax[0].legend(handles=[Line2D([], [], color=colors[m], ls="-",
@@ -584,8 +587,8 @@ def plot_efficiency(result, quantity="events", masses=None, u2min=None, u2max=No
                           for j, it in enumerate(its)],
                  fontsize=8, title="threshold")
 
-    ax[0].set_title(CHANNELS[result.channel]["desc"])
-    ax[1].set_title(f"{result.config.title()}\n{result.detector_label()}", fontsize=9)
+    #ax[0].set_title(CHANNELS[result.channel]["desc"])
+    #ax[1].set_title(f"{result.config.title()}\n{result.detector_label()}", fontsize=9)
     fig.tight_layout()
 
     if output:
@@ -632,7 +635,7 @@ def plot_efficiency_2d(result, quantity="efficiency", masses=None, u2min=None,
 
     # shared color normalization across mass panels
     if quantity == "efficiency":
-        norm, cbar_label = LogNorm(vmin=1e-5, vmax=1), "tagging efficiency"
+        norm, cbar_label = LogNorm(vmin=1e-6, vmax=1), "tagging efficiency"
     else:
         finite = np.concatenate([z[np.isfinite(z)] for z in zs.values()
                                  if np.isfinite(z).any()] or [np.array([1.0])])

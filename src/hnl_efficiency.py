@@ -212,25 +212,32 @@ class EfficiencyResult:
             return 0
         return int(np.argmin(np.abs(self.thresholds_pe - float(threshold_pe))))
 
-    def keys(self, masses=None, u2_values=None):
-        """Selected (m_N, U2) keys, optionally filtered by mass / mixing.
+    def keys(self, masses=None, u2min=None, u2max=None):
+        """Selected (m_N, U2) keys, filtered by mass (exact list) and by a U2
+        RANGE [u2min, u2max] (either bound None = open).
 
-        NOTE: U2 matching uses atol=0 -- the default np.isclose atol (1e-8) is
-        enormous next to U2 ~ 1e-11 and would match everything.
+        NOTE: mass matching uses atol=0 -- the default np.isclose atol (1e-8)
+        would swamp the small values in play.
         """
         out = []
         for (m_N, U2) in sorted(self.points):
             if masses is not None and not np.any(
                     np.isclose(m_N, np.atleast_1d(masses), rtol=1e-3, atol=0)):
                 continue
-            if u2_values is not None and not np.any(
-                    np.isclose(U2, np.atleast_1d(u2_values), rtol=1e-3, atol=0)):
+            if u2min is not None and U2 < u2min:
+                continue
+            if u2max is not None and U2 > u2max:
                 continue
             out.append((m_N, U2))
         return out
 
-    def _sum(self, field_name, masses=None, u2_values=None):
-        ks = self.keys(masses, u2_values)
+    def masses_in(self, masses=None, u2min=None, u2max=None):
+        """Sorted unique HNL masses among the selected keys."""
+        return sorted({m for (m, _U2) in self.keys(masses, u2min, u2max)})
+
+    def _sum(self, field_name, masses=None, u2min=None, u2max=None):
+        """Sum a per-point field over the selected keys (pools the U2 range)."""
+        ks = self.keys(masses, u2min, u2max)
         if not ks:
             raise ValueError("no (m_N, U2) points match the selection")
         vals = [self.points[k][field_name] for k in ks]
@@ -364,7 +371,8 @@ def compute(channel="dimuon", scan_dir=None, config=NOMINAL,
             else data["interaction_probability"], float))
 
         for iu, U2 in enumerate(U2_batch):
-            if u2_values is not None and not np.any(np.isclose(U2, u2_values, rtol=1e-3)):
+            if u2_values is not None and not np.any(
+                    np.isclose(U2, u2_values, rtol=1e-3, atol=0)):
                 continue
 
             metric = metric_fn(data, iu)         # (N_det, N_samples) photon metric
@@ -450,21 +458,21 @@ def _best_tagging_detector(metric, thr_photons):
 # --------------------------------------------------------------------------- #
 # Summaries
 # --------------------------------------------------------------------------- #
-def average_efficiency(result, masses=None, u2_values=None, threshold_pe=None):
+def average_efficiency(result, masses=None, u2min=None, u2max=None, threshold_pe=None):
     """Scalar rate-weighted average tagging efficiency = expected tagged events
-    / expected candidate events, over the selected (m_N, U2) points, at the
-    threshold nearest ``threshold_pe`` (default: first)."""
+    / expected candidate events, over the selected points (masses + U2 range),
+    at the threshold nearest ``threshold_pe`` (default: first)."""
     it = result.thr_index(threshold_pe)
-    tag = result._sum("tag_tot", masses, u2_values)[it]
-    cand = result._sum("cand_tot", masses, u2_values)
+    tag = result._sum("tag_tot", masses, u2min, u2max)[it]
+    cand = result._sum("cand_tot", masses, u2min, u2max)
     return float(tag / cand) if cand > 0 else 0.0
 
 
-def expected_events(result, masses=None, u2_values=None, threshold_pe=None):
-    """Total expected tagged events over the selected (m_N, U2) points, at the
-    threshold nearest ``threshold_pe`` (default: first)."""
+def expected_events(result, masses=None, u2min=None, u2max=None, threshold_pe=None):
+    """Total expected tagged events over the selected points (masses + U2 range),
+    at the threshold nearest ``threshold_pe`` (default: first)."""
     it = result.thr_index(threshold_pe)
-    return float(result._sum("tag_tot", masses, u2_values)[it])
+    return float(result._sum("tag_tot", masses, u2min, u2max)[it])
 
 
 def _print_summary(result):
@@ -495,68 +503,89 @@ def _apply_style():
             pass
 
 
-def _curve(result, key, var, quantity, it=0):
-    """(x, y) for one (m_N, U2) point at threshold index ``it``: var in
-    {'dist','b'}, quantity in {'events','efficiency'}."""
-    a = result.points[key]
-    if var == "dist":
-        x = result.dist_centers / 1e3          # km
-        tag, cand = a["tag_dist"][it], a["cand_dist"]
-    else:
-        x = result.b_centers                   # m
-        tag, cand = a["tag_b"][it], a["cand_b"]
+_LINESTYLES = ["-", "--", ":", "-."]
+
+
+def _y_from(tag, cand, quantity):
+    """Per-bin y: efficiency ratio (NaN where no candidates) or raw expected
+    tagged events."""
     if quantity == "efficiency":
         with np.errstate(divide="ignore", invalid="ignore"):
-            y = np.where(cand > 0, tag / cand, np.nan)
-    else:
-        y = tag
-    return x, y
+            return np.where(cand > 0, tag / cand, np.nan)
+    return tag
 
 
-def plot_efficiency(result, quantity="events", masses=None, u2_values=None,
-                    threshold_pe=None, output=None, ax=None):
+def _mass_colors(masses):
+    import matplotlib.pyplot as plt
+    cyc = plt.rcParams["axes.prop_cycle"].by_key().get(
+        "color", [f"C{i}" for i in range(10)])
+    return {m: cyc[i % len(cyc)] for i, m in enumerate(masses)}
+
+
+def plot_efficiency(result, quantity="events", masses=None, u2min=None, u2max=None,
+                    thresholds_pe=None, output=None, ax=None):
     """Two-panel figure: quantity vs distance (left) and vs HNL impact parameter
-    (right), one curve per selected (m_N, U2), at a single threshold.
+    (right).
+
+    One line per HNL mass (distinguished by COLOR) and per PE threshold
+    (distinguished by LINESTYLE).  Within each mass the U2 range [u2min, u2max]
+    is pooled (both bounds None -> all U2).
 
     quantity : {"events", "efficiency"}
         "events"     -> expected tagged events per bin (absolute).
         "efficiency" -> tagged / candidate per bin (0-1).
-    threshold_pe : float or None
-        Which PE threshold to plot (nearest match; default: first).  To overlay
-        several thresholds, use ``plot_threshold_comparison``.
+    thresholds_pe : iterable or None
+        Thresholds drawn as distinct linestyles (nearest matches; default: all).
     """
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     _apply_style()
 
-    ks = result.keys(masses, u2_values)
-    if not ks:
+    ms = result.masses_in(masses, u2min, u2max)
+    if not ms:
         raise ValueError("no (m_N, U2) points match the selection")
-    it = result.thr_index(threshold_pe)
+    its = (list(range(len(result.thresholds_pe))) if thresholds_pe is None
+           else [result.thr_index(pe) for pe in np.atleast_1d(thresholds_pe)])
+    colors = _mass_colors(ms)
 
     if ax is None:
         fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
     else:
         fig = ax[0].figure
 
+    dx, bx = result.dist_centers / 1e3, result.b_centers
+    for m in ms:
+        td = result._sum("tag_dist", [m], u2min, u2max)      # (n_thr, n_dist)
+        cd = result._sum("cand_dist", [m], u2min, u2max)     # (n_dist,)
+        tb = result._sum("tag_b", [m], u2min, u2max)
+        cb = result._sum("cand_b", [m], u2min, u2max)
+        for j, it in enumerate(its):
+            ls = _LINESTYLES[j % len(_LINESTYLES)]
+            ax[0].step(dx, _y_from(td[it], cd, quantity), where="mid",
+                       color=colors[m], ls=ls)
+            ax[1].step(bx, _y_from(tb[it], cb, quantity), where="mid",
+                       color=colors[m], ls=ls)
+
     ylabel = ("expected tagged events / bin" if quantity == "events"
               else "tagging efficiency")
-    for (m_N, U2) in ks:
-        label = f"$m_N$={m_N:.0f} GeV, $U^2$={U2:.1e}"
-        x, y = _curve(result, (m_N, U2), "dist", quantity, it)
-        ax[0].step(x, y, where="mid", label=label)
-        xb, yb = _curve(result, (m_N, U2), "b", quantity, it)
-        ax[1].step(xb, yb, where="mid", label=label)
-
     ax[0].set_xlabel("decay-to-detector distance [km]")
     ax[1].set_xlabel("HNL impact parameter to detector [m]")
     for a in ax:
         a.set_ylabel(ylabel)
         a.set_yscale("log")
-        a.legend(fontsize=8)
+
+    # two legends: color = HNL mass (left panel), linestyle = threshold (right)
+    ax[0].legend(handles=[Line2D([], [], color=colors[m], ls="-",
+                                 label=f"$m_N$={m:.0f} GeV") for m in ms],
+                 fontsize=8, title="HNL mass")
+    ax[1].legend(handles=[Line2D([], [], color="k",
+                                 ls=_LINESTYLES[j % len(_LINESTYLES)],
+                                 label=f"{result.thresholds_pe[it]:.0f} PE")
+                          for j, it in enumerate(its)],
+                 fontsize=8, title="threshold")
+
     ax[0].set_title(CHANNELS[result.channel]["desc"])
-    ax[1].set_title(f"{result.config.title()}\nthreshold = "
-                    f"{result.thresholds_pe[it]:.0f} PE, {result.detector_label()}",
-                    fontsize=9)
+    ax[1].set_title(f"{result.config.title()}\n{result.detector_label()}", fontsize=9)
     fig.tight_layout()
 
     if output:
@@ -566,129 +595,86 @@ def plot_efficiency(result, quantity="events", masses=None, u2_values=None,
     return fig, ax
 
 
-def plot_efficiency_2d(result, quantity="efficiency", masses=None, u2_values=None,
-                       threshold_pe=None, output=None, ax=None, cmap="viridis"):
-    """2D map of the quantity in (distance, HNL impact parameter).
+def plot_efficiency_2d(result, quantity="efficiency", masses=None, u2min=None,
+                       u2max=None, threshold_pe=None, ncols=3, output=None,
+                       axes=None, cmap="viridis"):
+    """Grid of 2D (distance, HNL impact parameter) maps, ONE PANEL PER HNL MASS.
 
-    Unlike ``plot_efficiency`` (which overlays one curve per point), the 2D map
-    AGGREGATES the selected (m_N, U2) points: summed expected events for
-    ``quantity="events"``, and pooled ratio sum(tagged)/sum(candidate) for
-    ``quantity="efficiency"``.  Filter to a single point for a per-point map.
+    Within each mass panel the U2 range [u2min, u2max] is pooled, at the single
+    threshold nearest ``threshold_pe`` (default: first).  A shared color scale
+    and colorbar make the mass panels directly comparable.  No-candidate bins
+    are left blank.
 
     quantity : {"events", "efficiency"}
-    threshold_pe : float or None
-        Which PE threshold to map (nearest match; default: first).
+    ncols : int
+        Panels per row.
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
     _apply_style()
 
     it = result.thr_index(threshold_pe)
-    tag2d = result._sum("tag_2d", masses, u2_values)[it]      # (n_dist, n_b)
-    cand2d = result._sum("cand_2d", masses, u2_values)
-
-    x = result.dist_edges / 1e3        # km (n_dist+1,)
-    y = result.b_edges                 # m  (n_b+1,)
-
-    if quantity == "efficiency":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            z = np.where(cand2d > 0, tag2d / cand2d, np.nan)
-        norm, cbar_label = LogNorm(vmin=1e-5,vmax=1), "tagging efficiency"
-    else:
-        z = np.where(tag2d > 0, tag2d, np.nan)
-        vmax = np.nanmax(z) if np.isfinite(z).any() else 1.0
-        vmin = np.nanmin(z) if np.isfinite(z).any() else vmax
-        norm = LogNorm(vmin=max(vmin, vmax * 1e-4), vmax=vmax)
-        cbar_label = "expected tagged events / bin"
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(6.5, 4.6))
-    else:
-        fig = ax.figure
-
-    # z is (n_dist, n_b); pcolormesh wants C with shape (len(y)-1, len(x)-1) -> z.T
-    cmap_obj = plt.get_cmap(cmap).copy()
-    cmap_obj.set_bad(alpha=0.0)        # leave empty (no-candidate) bins blank
-    mesh = ax.pcolormesh(x, y, np.ma.masked_invalid(z.T), cmap=cmap_obj,
-                         norm=norm, shading="flat")
-    cb = fig.colorbar(mesh, ax=ax)
-    cb.set_label(cbar_label)
-
-    ax.set_xlabel("decay-to-detector distance [km]")
-    ax.set_ylabel("HNL impact parameter to detector [m]")
-    ks = result.keys(masses, u2_values)
-    sub = (f"$m_N$={ks[0][0]:.0f} GeV, $U^2$={ks[0][1]:.1e}" if len(ks) == 1
-           else f"{len(ks)} (m_N,U2) points pooled")
-    ax.set_title(f"{CHANNELS[result.channel]['desc']}\n{sub}, "
-                 f"threshold {result.thresholds_pe[it]:.0f} PE\n{result.detector_label()}",
-                 fontsize=9)
-    fig.tight_layout()
-
-    if output:
-        os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
-        fig.savefig(output, dpi=150, bbox_inches="tight")
-        print(f"[hnl_efficiency] saved {output}")
-    return fig, ax
-
-
-def plot_threshold_comparison(result, quantity="efficiency", masses=None,
-                              u2_values=None, thresholds_pe=None, output=None, ax=None):
-    """Two-panel figure (vs distance, vs impact parameter) overlaying one curve
-    per PE threshold, for the selected (m_N, U2) points pooled together.
-
-    thresholds_pe : iterable or None
-        Which thresholds to overlay (nearest matches; default: all in result).
-    """
-    import matplotlib.pyplot as plt
-    _apply_style()
-
-    ks = result.keys(masses, u2_values)
-    if not ks:
+    ms = result.masses_in(masses, u2min, u2max)
+    if not ms:
         raise ValueError("no (m_N, U2) points match the selection")
-    its = (list(range(len(result.thresholds_pe))) if thresholds_pe is None
-           else [result.thr_index(pe) for pe in np.atleast_1d(thresholds_pe)])
 
-    # pool the selected (m_N, U2) points once
-    td = result._sum("tag_dist", masses, u2_values)     # (n_thr, n_dist)
-    cd = result._sum("cand_dist", masses, u2_values)    # (n_dist,)
-    tb = result._sum("tag_b", masses, u2_values)        # (n_thr, n_b)
-    cb = result._sum("cand_b", masses, u2_values)       # (n_b,)
+    x, y = result.dist_edges / 1e3, result.b_edges
 
-    def y_of(tag, cand):
+    zs = {}
+    for m in ms:
+        tag2d = result._sum("tag_2d", [m], u2min, u2max)[it]
+        cand2d = result._sum("cand_2d", [m], u2min, u2max)
         if quantity == "efficiency":
             with np.errstate(divide="ignore", invalid="ignore"):
-                return np.where(cand > 0, tag / cand, np.nan)
-        return tag
+                zs[m] = np.where(cand2d > 0, tag2d / cand2d, np.nan)
+        else:
+            zs[m] = np.where(tag2d > 0, tag2d, np.nan)
 
-    if ax is None:
-        fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
+    # shared color normalization across mass panels
+    if quantity == "efficiency":
+        norm, cbar_label = LogNorm(vmin=1e-5, vmax=1), "tagging efficiency"
     else:
-        fig = ax[0].figure
+        finite = np.concatenate([z[np.isfinite(z)] for z in zs.values()
+                                 if np.isfinite(z).any()] or [np.array([1.0])])
+        vmax = finite.max()
+        norm = LogNorm(vmin=vmax * 1e-4, vmax=vmax)
+        cbar_label = "expected tagged events / bin"
 
-    ylabel = ("expected tagged events / bin" if quantity == "events"
-              else "tagging efficiency")
-    for it in its:
-        label = f"{result.thresholds_pe[it]:.0f} PE"
-        ax[0].step(result.dist_centers / 1e3, y_of(td[it], cd), where="mid", label=label)
-        ax[1].step(result.b_centers, y_of(tb[it], cb), where="mid", label=label)
+    nrows = int(np.ceil(len(ms) / ncols))
+    ncol = min(ncols, len(ms))
+    if axes is None:
+        fig, axes = plt.subplots(nrows, ncol, squeeze=False,
+                                 figsize=(4.3 * ncol, 3.7 * nrows),
+                                 layout="constrained")
+    else:
+        fig = np.ravel(axes)[0].figure
+    axflat = np.ravel(axes)
 
-    ax[0].set_xlabel("decay-to-detector distance [km]")
-    ax[1].set_xlabel("HNL impact parameter to detector [m]")
-    pooled = (f"$m_N$={ks[0][0]:.0f} GeV, $U^2$={ks[0][1]:.1e}" if len(ks) == 1
-              else f"{len(ks)} (m_N,U2) points pooled")
-    for a in ax:
-        a.set_ylabel(ylabel)
-        a.set_yscale("log")
-        a.legend(fontsize=8, title="threshold")
-    ax[0].set_title(CHANNELS[result.channel]["desc"])
-    ax[1].set_title(f"{pooled}\n{result.detector_label()}", fontsize=9)
-    fig.tight_layout()
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad(alpha=0.0)
+    mesh = None
+    for k, m in enumerate(ms):
+        a = axflat[k]
+        # z is (n_dist, n_b); pcolormesh wants (n_b, n_dist) -> transpose
+        mesh = a.pcolormesh(x, y, np.ma.masked_invalid(zs[m].T), cmap=cmap_obj,
+                            norm=norm, shading="flat")
+        a.set_title(f"$m_N$={m:.0f} GeV", fontsize=9)
+        a.set_xlabel("distance [km]")
+        a.set_ylabel("impact parameter [m]")
+    for k in range(len(ms), len(axflat)):     # hide any unused panels
+        axflat[k].axis("off")
+
+    cb = fig.colorbar(mesh, ax=axes, fraction=0.046, pad=0.02)
+    cb.set_label(cbar_label)
+    fig.suptitle(f"{CHANNELS[result.channel]['desc']}  --  threshold "
+                 f"{result.thresholds_pe[it]:.0f} PE, {result.detector_label()}",
+                 fontsize=10)
 
     if output:
         os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
         fig.savefig(output, dpi=150, bbox_inches="tight")
         print(f"[hnl_efficiency] saved {output}")
-    return fig, ax
+    return fig, axes
 
 
 # --------------------------------------------------------------------------- #
@@ -702,8 +688,12 @@ def _main():
     p.add_argument("--min-pe", type=float, nargs="+", default=[MIN_PHOTOELECTRONS],
                    help="one or more PE thresholds (evaluated in a single pass)")
     p.add_argument("--pde", type=float, default=SIPM_PDE)
-    p.add_argument("--masses", type=float, nargs="+", default=None)
-    p.add_argument("--u2", type=float, nargs="+", default=None, dest="u2_values")
+    p.add_argument("--masses", type=float, nargs="+", default=None,
+                   help="HNL masses to include (one line/panel each; default all)")
+    p.add_argument("--u2min", type=float, default=None,
+                   help="lower U2 bound to pool over (default: no bound)")
+    p.add_argument("--u2max", type=float, default=None,
+                   help="upper U2 bound to pool over (default: no bound)")
     p.add_argument("--quantity", choices=["events", "efficiency"], default="events")
     p.add_argument("--twod", action="store_true",
                    help="make the 2D distance x impact-parameter map instead of "
@@ -728,28 +718,29 @@ def _main():
 
     res = compute(channel=args.channel, scan_dir=args.scan_dir,
                   min_pe=args.min_pe, pde=args.pde,
-                  masses=args.masses, u2_values=args.u2_values,
-                  detectors=detectors,
+                  masses=args.masses, detectors=detectors,
                   use_decay_pos_prob=not args.no_decay_pos_prob)
-    print("[hnl_efficiency] pooled over all selected points:")
+    print(f"[hnl_efficiency] pooled over U2 in "
+          f"[{args.u2min}, {args.u2max}]:")
     for pe in res.thresholds_pe:
-        print(f"    {pe:5.0f} PE:  avg tag efficiency={average_efficiency(res, threshold_pe=pe):.3e}"
-              f"   expected tagged events={expected_events(res, threshold_pe=pe):.3g}")
+        print(f"    {pe:5.0f} PE:  avg tag efficiency="
+              f"{average_efficiency(res, u2min=args.u2min, u2max=args.u2max, threshold_pe=pe):.3e}"
+              f"   expected tagged events="
+              f"{expected_events(res, u2min=args.u2min, u2max=args.u2max, threshold_pe=pe):.3g}")
 
     if args.output:
-        multi = len(res.thresholds_pe) > 1
         if args.twod:
-            if multi:      # one map per threshold, PE appended to the filename
-                base, ext = os.path.splitext(args.output)
-                for pe in res.thresholds_pe:
-                    plot_efficiency_2d(res, quantity=args.quantity, threshold_pe=pe,
-                                       output=f"{base}_{pe:.0f}pe{ext}")
-            else:
-                plot_efficiency_2d(res, quantity=args.quantity, output=args.output)
-        elif multi:        # overlay thresholds on one 1D figure
-            plot_threshold_comparison(res, quantity=args.quantity, output=args.output)
+            # 2D is single-threshold: one figure (of per-mass panels) per threshold
+            multi = len(res.thresholds_pe) > 1
+            base, ext = os.path.splitext(args.output)
+            for pe in res.thresholds_pe:
+                out = f"{base}_{pe:.0f}pe{ext}" if multi else args.output
+                plot_efficiency_2d(res, quantity=args.quantity, u2min=args.u2min,
+                                   u2max=args.u2max, threshold_pe=pe, output=out)
         else:
-            plot_efficiency(res, quantity=args.quantity, output=args.output)
+            # 1D: one line/mass (color), one linestyle/threshold -> single figure
+            plot_efficiency(res, quantity=args.quantity, u2min=args.u2min,
+                            u2max=args.u2max, output=args.output)
 
 
 if __name__ == "__main__":

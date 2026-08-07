@@ -45,11 +45,15 @@ import siren
 from siren import interactions, dataclasses, utilities
 
 from src.constants import N_muon_decays
-from src.cherenkov import cherenkov_photons_multi_detector, cherenkov_transmission
+from src.cherenkov import (cherenkov_photons_multi_detector, cherenkov_transmission,
+                          N_AIR)
 from src.constants import R_det
 from src.balloon import muon_range_in_air, hadronic_shower_cherenkov, muon_energy_in_earth
 from src.background import (sigma_CC_nu, atmospheric_column_depth_nucleons,
                            sample_interaction_altitude)
+# on-camera imaging (centroid) reused from the HNL imaging module, so the charm
+# on-camera muon separation is computed identically to the signal (uniform_n=N_AIR)
+from src.muon_image_spread import muon_image_at_detector, two_muon_separation_deg
 
 PT = dataclasses.Particle.ParticleType
 
@@ -124,7 +128,11 @@ class CharmDISModel:
         self._xs_incl = {}       # "cc"/"nc" -> QuarkDISFromSpline (inclusive)
         self._sig_charm = {}     # "cc"/"nc" -> list of signatures
         self._decays = {}        # D type -> (CharmMesonDecay, mu_signature, BR_mu)
+        self._frac_grid = None   # (log E grid, total charm fraction) for interpolation
+        self._frag = {}          # "cc"/"nc" -> (log E grid, (n_sig, n_E) D-species fractions)
         self._load()
+        self._build_fraction_table()
+        self._build_fragmentation_table()
 
     # -- spline loading -------------------------------------------------- #
     def _spline_paths(self, current, charm):
@@ -165,13 +173,59 @@ class CharmDISModel:
         den = self._xs_incl[current].TotalCrossSection(self.nu_type, E)
         return (num / den) if den > 0 else 0.0
 
-    def total_charm_fraction(self, E_nu):
-        """Charm fraction summed over the loaded currents (CC [+ NC])."""
+    def _total_charm_fraction_exact(self, E_nu):
+        """Charm fraction summed over the loaded currents (CC [+ NC]), evaluated
+        directly from the splines (slow; used to build the interpolation table)."""
         f = self.charm_fraction(E_nu, "cc")
         if self.include_nc:
             # NC charm relative to the *CC* total (background.py's P_CC baseline)
             f += self.charm_fraction(E_nu, "nc")
         return f
+
+    def _build_fraction_table(self, E_min=5.0, E_max=1e5, n=80):
+        """Precompute the total charm fraction on a log-E grid.  The fraction is
+        smooth in log E, so per-event evaluation becomes a cheap interpolation
+        instead of 2-4 SIREN TotalCrossSection calls (critical at N~1e5 events)."""
+        logE = np.linspace(np.log10(E_min), np.log10(E_max), n)
+        frac = np.array([self._total_charm_fraction_exact(10.0 ** le)
+                         for le in logE])
+        self._frac_grid = (logE, frac)
+
+    def total_charm_fraction(self, E_nu):
+        """Total charm fraction (CC [+ NC]) at E_nu [GeV], via interpolation of
+        the precomputed table (clipped to the grid range)."""
+        logE, frac = self._frac_grid
+        return float(np.interp(np.log10(max(float(E_nu), 1e-3)), logE, frac))
+
+    def _build_fragmentation_table(self, E_min=5.0, E_max=1e5, n=60):
+        """Precompute the D-species fragmentation fractions vs energy for each
+        current.  The per-signature TotalCrossSection encodes the fragmentation
+        fraction (their sum is the inclusive-over-D charm total), so sampling the
+        D-production signature must be weighted by these -- NOT uniform (D0 ~0.61,
+        D+ ~0.24, Ds+ ~0.15).  Cached so per-event sampling is a cheap interp."""
+        logE = np.linspace(np.log10(E_min), np.log10(E_max), n)
+        for cur, sigs in self._sig_charm.items():
+            frac = np.zeros((len(sigs), n))
+            for j, le in enumerate(logE):
+                E = 10.0 ** le
+                xsecs = np.array([self._sig_xsec(self._xs_charm[cur], sg, E)
+                                  for sg in sigs])
+                tot = xsecs.sum()
+                frac[:, j] = (xsecs / tot) if tot > 0 else 1.0 / len(sigs)
+            self._frag[cur] = (logE, frac)
+
+    @staticmethod
+    def _sig_xsec(xs, signature, E):
+        """Per-signature (per-D-species) total cross section at energy E [GeV]."""
+        r = dataclasses.InteractionRecord()
+        r.signature = signature
+        r.primary_momentum = [float(E), 0.0, 0.0, float(E)]
+        r.primary_mass = 0.0
+        r.target_mass = ISOSCALAR_MASS
+        try:
+            return float(xs.TotalCrossSection(r))
+        except Exception:
+            return 0.0
 
     # -- D decay setup --------------------------------------------------- #
     def _get_decay(self, D_type):
@@ -234,9 +288,13 @@ class CharmDISModel:
         nu_dir = np.asarray(nu_dir, float)
         p = float(E_nu) * nu_dir
         sigs = self._sig_charm[current]
-        # pick a D-production signature uniformly (the three D species; the
-        # physical mix is encoded in the sampler's fragmentation)
-        sig = sigs[np.random.randint(len(sigs))]
+        # pick the D-production signature weighted by the per-species cross
+        # section (= physical fragmentation fraction), interpolated in energy.
+        logE, frac = self._frag[current]
+        w = np.array([np.interp(np.log10(max(float(E_nu), 1e-3)), logE, frac[k])
+                      for k in range(len(sigs))])
+        w = w / w.sum() if w.sum() > 0 else np.ones(len(sigs)) / len(sigs)
+        sig = sigs[np.random.choice(len(sigs), p=w)]
 
         ir = dataclasses.InteractionRecord()
         ir.signature = sig
@@ -346,6 +404,12 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
         N_nu_per_muon        float
         cherenkov_weight     float
         interaction_altitudes (N_samples,)
+        kinematics           dict of per-event arrays (for the HNL-vs-charm
+                             discriminator study): the two muon directions and
+                             energies, their lab OPENING ANGLE, the hadronic
+                             shower energy/direction, the neutrino energy, the
+                             interaction position, and the D decay length.  Zero
+                             for events that were not evaluated / had no dimuon.
     The expected number of tagged background events is
         N_nu_per_muon * N_muon_decays * <interaction_weights * 1(tag)>_MC
     (see ``summarize_charm_background``).
@@ -373,20 +437,38 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
     interaction_weights = np.zeros(N_samples)
     interaction_altitudes = np.zeros(N_samples)
 
+    # Per-event kinematics for the HNL-vs-charm discriminator study.
+    kin = dict(
+        mu1_dir=np.zeros((N_samples, 3)), mu2_dir=np.zeros((N_samples, 3)),
+        mu1_E=np.zeros(N_samples), mu2_E=np.zeros(N_samples),
+        opening_deg=np.full(N_samples, np.nan),
+        had_E=np.zeros(N_samples), had_dir=np.zeros((N_samples, 3)),
+        nu_energy=np.asarray(nu_energy, float).copy(),
+        int_pos=np.zeros((N_samples, 3)),
+        D_decay_length=np.zeros(N_samples), D_code=np.zeros(N_samples, dtype=int),
+        # measurable on-camera muon separation (both muons on ONE camera),
+        # computed identically to muon_image_spread's oncam_sep_deg
+        oncam_sep_deg=np.full(N_samples, np.nan),
+        same_detector=np.zeros(N_samples, dtype=bool),
+    )
+
     # --- 3. Upward-going neutrinos only ---
     going_up = nu_dirs[:, 2] > 0
     upward_indices = np.where(going_up)[0]
     if len(upward_indices) == 0:
         return (photon_counts, mu_photon_counts, hadronic_photon_counts,
-                interaction_weights, N_nu_per_muon, 1.0, interaction_altitudes)
+                interaction_weights, N_nu_per_muon, 1.0, interaction_altitudes, kin)
 
     # --- 4. Interaction probability (charm fraction x total-CC prob) ---
+    # Vectorized: charm fraction from the interpolation table, CC baseline and
+    # column depth from background.py.
     column_depth = atmospheric_column_depth_nucleons(
         0, max_det_height, flux_geometry.cos_surface_exit_angle)
-    for idx in upward_indices:
-        f_charm = model.total_charm_fraction(nu_energy[idx])
-        interaction_weights[idx] = (f_charm * sigma_CC_nu(nu_energy[idx])
-                                    * column_depth)
+    E_up = np.asarray(nu_energy, float)[upward_indices]
+    logE, frac = model._frac_grid
+    f_charm = np.interp(np.log10(np.maximum(E_up, 1e-3)), logE, frac)
+    interaction_weights[upward_indices] = (f_charm * sigma_CC_nu(E_up)
+                                           * column_depth)
 
     # --- 5. Cap expensive Cherenkov/SIREN evaluations ---
     N_valid = len(upward_indices)
@@ -422,6 +504,21 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
         # fraction BR(D->mu) of charm events yield the second muon
         interaction_weights[idx] *= ev["weight"]
 
+        # record per-event kinematics (the discriminator handles)
+        n1 = ev["mu1_dir"] / np.linalg.norm(ev["mu1_dir"])
+        n2 = ev["mu2_dir"] / np.linalg.norm(ev["mu2_dir"])
+        kin["mu1_dir"][idx] = n1
+        kin["mu2_dir"][idx] = n2
+        kin["mu1_E"][idx] = ev["mu1_E"]
+        kin["mu2_E"][idx] = ev["mu2_E"]
+        kin["opening_deg"][idx] = np.degrees(
+            np.arccos(np.clip(n1 @ n2, -1.0, 1.0)))
+        kin["had_E"][idx] = ev["had_E"]
+        kin["had_dir"][idx] = ev["had_dir"]
+        kin["int_pos"][idx] = int_pos
+        kin["D_decay_length"][idx] = ev["decay_length"]
+        kin["D_code"][idx] = int(ev["D_type"])
+
         valid_dets = [i for i, dp in enumerate(detector_positions)
                       if z_int < dp[2]]
         if not valid_dets:
@@ -429,6 +526,8 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
         valid_det_pos = [detector_positions[i] for i in valid_dets]
 
         # --- Cherenkov from each of the two muons ---
+        N_ph_by_muon = {}          # k -> photon counts over valid_dets
+        track_by_muon = {}         # k -> (mu_dir, E_mu, N_track) for re-imaging
         for k, dir_key, E_key in muon_kin:
             mu_dir = ev[dir_key]
             E_mu = ev[E_key]
@@ -451,6 +550,35 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
                 N_ph = np.zeros(len(valid_dets))
             for j, i_det in enumerate(valid_dets):
                 mu_photon_counts[k, i_det, idx] = N_ph[j]
+            N_ph_by_muon[k] = N_ph
+            track_by_muon[k] = (mu_dir, E_mu, N_track)
+
+        # --- measurable on-camera separation: both muons' brightest detector ---
+        # If both muons are brightest on the SAME camera, image each there and
+        # take the angle between the two image centroids (matches muon_image_spread
+        # oncam_sep_deg; uniform_n=N_AIR to match the analysis Cherenkov model).
+        if 0 in N_ph_by_muon and 1 in N_ph_by_muon:
+            j0 = int(np.argmax(N_ph_by_muon[0]))
+            j1 = int(np.argmax(N_ph_by_muon[1]))
+            if N_ph_by_muon[0][j0] > 0 and N_ph_by_muon[1][j1] > 0:
+                same = valid_dets[j0] == valid_dets[j1]
+                kin["same_detector"][idx] = bool(same)
+                if same:
+                    det = detector_positions[valid_dets[j0]]
+                    cents, ok = [], True
+                    for k in (0, 1):
+                        mu_dir, E_mu, N_track = track_by_muon[k]
+                        im = muon_image_at_detector(
+                            int_pos, mu_dir, E_mu, det, decay_altitude=z_int,
+                            R_det=R_det, N_psi=300, N_track=N_track,
+                            apply_transmission=False, uniform_n=N_AIR)
+                        if im is None:
+                            ok = False
+                            break
+                        cents.append(im["centroid"])
+                    if ok:
+                        kin["oncam_sep_deg"][idx] = two_muon_separation_deg(
+                            cents[0], cents[1])
 
         # --- Hadronic shower ---
         if include_hadronic_shower and ev["had_E"] > 1.0:
@@ -462,7 +590,7 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
     photon_counts = mu_photon_counts.sum(axis=0) + hadronic_photon_counts
     return (photon_counts, mu_photon_counts, hadronic_photon_counts,
             interaction_weights * position_weights, N_nu_per_muon,
-            cherenkov_weight, interaction_altitudes)
+            cherenkov_weight, interaction_altitudes, kin)
 
 
 def summarize_charm_background(mu_photon_counts, interaction_weights,

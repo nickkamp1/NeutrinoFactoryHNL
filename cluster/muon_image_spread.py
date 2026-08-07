@@ -226,8 +226,7 @@ def two_muon_separation_deg(centroid1, centroid2):
 # SIRENDimuonGeometry.compute_dimuon_signal_at_satellite up to the Cherenkov step)
 # --------------------------------------------------------------------------- #
 def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
-                             seed=None, uniform_gen=False, sampling=None,
-                             mix_frac_log=0.5, dmin_frac=1e-4):
+                             seed=None, uniform_gen=False):
     """Sample production + decay for N_samples HNL dimuon events.
 
     Returns a dict of arrays (length N_samples):
@@ -237,21 +236,15 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
         (scalar), BR_mumu (scalar).
     The physics is identical to compute_dimuon_signal_at_satellite.
 
-    sampling : {"trunc_exp", "uniform", "mixture"} or None
-        Decay-distance proposal (importance sampling).  None falls back to
-        uniform_gen (True->"uniform", False->"trunc_exp").
-          "trunc_exp" -- physical truncated exponential (no reweight coverage).
-          "uniform"   -- uniform on (0, d_max); covers the LONG-lived regime.
-          "mixture"   -- fraction ``mix_frac_log`` LOG-uniform on (dmin, d_max)
-                         (dense at short decay distance -> covers the SHORT-lived
-                         / high-U2 regime, i.e. the upper sensitivity edge) plus
-                         the rest uniform (long-lived regime).  Best coverage for
-                         reweighting across the whole (m_N, U2) plane.
-        The returned ``sampling_pdf`` q(decay_dist) lets any target (m_N, U2) be
-        reweighted analytically as decay_pos_probability = p_target/q (see
-        src/hnl_sensitivity.py); decay_dist/decay_length/d_max are also returned.
-    mix_frac_log, dmin_frac : float
-        Log-uniform fraction and its lower edge dmin = max(d_max*dmin_frac, 1 m).
+    uniform_gen : bool
+        If True, sample the decay distance UNIFORMLY on (0, d_max) and carry the
+        truncated-exponential importance weight in decay_pos_probability.  This
+        broadly covers decay positions so the events reweight to any U2 with low
+        variance (matching the dimuon scan reference) -- required for the
+        sensitivity reweighting.  If False (default), sample from the truncated
+        exponential (decay_pos_probability = 1).  decay_dist/decay_length/d_max
+        are returned so downstream events can be reweighted to any (m_N, U2) via
+        HNLFluxGeometry.compute_reweighted_signal_at_satellite.
     """
     from src.xs_and_decays import HNL_decay_length
     from src.muon_beam_dump_helpers import muon_energy_in_earth, d_max_curved_earth
@@ -276,45 +269,21 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
     upward = cos_z > 0
     d_max = np.where(upward, d_max_curved_earth(cos_z, max_det_height), 0.0)
     d_max = np.maximum(d_max, 0.0)
-    mode = sampling if sampling is not None else ("uniform" if uniform_gen else "trunc_exp")
-    dmin = np.maximum(d_max * dmin_frac, 1.0)          # log-uniform lower edge
-    ln_ratio = np.log(np.maximum(d_max, dmin * 1.0001) / dmin)  # ln(d_max/dmin)
     with np.errstate(divide='ignore', invalid='ignore'):
         decay_probability = np.where(d_max > 0, 1.0 - np.exp(-d_max / decay_length), 0.0)
-        if mode == "trunc_exp":
-            # sample from the physical truncated exponential; q = p
+        if uniform_gen:
+            decay_dist = np.random.uniform(0, d_max, N_samples)
+            decay_pos_probability = np.where(
+                decay_probability > 0,
+                np.exp(-decay_dist / decay_length) * d_max
+                / (decay_length * (1.0 - np.exp(-d_max / decay_length))),
+                0.0)
+        else:
             u = np.random.uniform(0, 1, N_samples)
             exp_term = np.exp(-d_max / decay_length)
             decay_dist = np.where(decay_probability > 0,
                                   -decay_length * np.log(1.0 - u * (1.0 - exp_term)), 0.0)
-            sampling_pdf = np.where(
-                decay_probability > 0,
-                np.exp(-decay_dist / decay_length)
-                / (decay_length * (1.0 - np.exp(-d_max / decay_length))), 1.0)
-        elif mode == "uniform":
-            decay_dist = np.random.uniform(0, d_max, N_samples)
-            sampling_pdf = np.where(d_max > 0, 1.0 / d_max, 1.0)
-        elif mode == "mixture":
-            # MIXTURE proposal: fraction (1-mix_frac_log) uniform on (0, d_max)
-            # for the long-lived regime, mix_frac_log log-uniform on (dmin, d_max)
-            # for the short-lived regime.  Stored sampling_pdf = q(decay_dist).
-            pick_log = np.random.uniform(0, 1, N_samples) < mix_frac_log
-            uu = np.random.uniform(0, 1, N_samples)
-            d_unif = uu * d_max
-            d_log = dmin * (d_max / dmin) ** uu
-            decay_dist = np.where(pick_log, d_log, d_unif)
-            q_u = np.where(d_max > 0, 1.0 / d_max, 0.0)
-            q_l = np.where(decay_dist >= dmin, 1.0 / (decay_dist * ln_ratio), 0.0)
-            sampling_pdf = (1.0 - mix_frac_log) * q_u + mix_frac_log * q_l
-            sampling_pdf = np.where(sampling_pdf > 0, sampling_pdf, 1.0)
-        else:
-            raise ValueError(f"unknown sampling mode {mode!r}")
-        # decay_pos_probability = physical_pdf / sampling_pdf (importance weight)
-        p_ref = np.where(decay_probability > 0,
-                         np.exp(-decay_dist / decay_length)
-                         / (decay_length * (1.0 - np.exp(-d_max / decay_length))), 0.0)
-        decay_pos_probability = np.where(decay_probability > 0,
-                                         p_ref / sampling_pdf, 0.0)
+            decay_pos_probability = np.ones_like(decay_dist)
     decay_points = prod_points + decay_dist[:, None] * hnl_dirs
     valid_decay = (decay_points[:, 2] > 0) & (decay_probability > 0)
 
@@ -322,7 +291,6 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
                 E_mu1=E_mu1, E_mu2=E_mu2, hnl_energy=hnl_energy,
                 decay_probability=decay_probability,
                 decay_pos_probability=decay_pos_probability,
-                sampling_pdf=sampling_pdf,
                 decay_dist=decay_dist, decay_length=decay_length, d_max=d_max,
                 valid_decay=valid_decay,
                 interaction_probability=float(interaction_probability),
@@ -335,8 +303,7 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
 def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
                         max_events=None, R_det=R_DET_DEFAULT,
                         pixel_deg=PIXEL_DEG_DEFAULT, N_psi=300, seed=None,
-                        verbose=True, uniform_n=None, uniform_gen=False,
-                        sampling=None):
+                        verbose=True, uniform_n=None, uniform_gen=False):
     """Per-event image statistics for one (m_N, U2).
 
     For every valid decay, each muon is imaged at the detector it illuminates
@@ -369,7 +336,7 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
     """
     kin = sample_dimuon_kinematics(geom, m_N, U2, detector_positions,
                                    N_samples=N_samples, seed=seed,
-                                   uniform_gen=uniform_gen, sampling=sampling)
+                                   uniform_gen=uniform_gen)
     det_pos = [np.asarray(p, float) for p in detector_positions]
     valid_idx = np.where(kin["valid_decay"])[0]
 
@@ -384,10 +351,8 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
             "same_detector", "both_detected", "n_ph1", "n_ph2",
             "E_mu1", "E_mu2", "hnl_energy", "decay_altitude",
             "det1_alt_km", "det2_alt_km",
-            # reweighting inputs: sampling_pdf q(decay_dist) lets hnl_sensitivity
-            # reweight to any (m_N, U2) analytically as p_target/q
-            "decay_dist", "decay_length", "d_max", "decay_pos_probability",
-            "sampling_pdf")
+            # reweighting inputs (for HNLFluxGeometry.compute_reweighted_signal...)
+            "decay_dist", "decay_length", "d_max", "decay_pos_probability")
     cols = {k: [] for k in keys}
 
     def best_detector(mu_dir, E_mu, dp, alt, dets):
@@ -451,7 +416,6 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
         cols["decay_length"].append(kin["decay_length"][i])
         cols["d_max"].append(kin["d_max"][i])
         cols["decay_pos_probability"].append(kin["decay_pos_probability"][i])
-        cols["sampling_pdf"].append(kin["sampling_pdf"][i])
 
     out = {k: np.asarray(v) for k, v in cols.items()}
     n_ev = len(out["weight"])
@@ -477,7 +441,7 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
          N_samples=2000, max_events=2000, geom=None, E_mu=5000,
          dump_depth=100, dump_angle=1.53, nature="Majorana", seed=12345,
          pixel_deg=PIXEL_DEG_DEFAULT, R_det=R_DET_DEFAULT, N_psi=300,
-         uniform_n=None, uniform_gen=False, sampling=None):
+         uniform_n=None, uniform_gen=False):
     """Scan (m_N, U2) and concatenate the per-event image statistics.
 
     If ``output`` is given, saves a flat npz whose per-event arrays are the
@@ -503,8 +467,7 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
                       "oncam_sep_deg", "same_detector", "both_detected",
                       "n_ph1", "n_ph2", "E_mu1", "E_mu2", "hnl_energy",
                       "decay_altitude", "det1_alt_km", "det2_alt_km",
-                      "decay_dist", "decay_length", "d_max", "decay_pos_probability",
-                      "sampling_pdf")
+                      "decay_dist", "decay_length", "d_max", "decay_pos_probability")
     acc = {k: [] for k in per_event_keys}
     meta = {}
     for m_N in masses:
@@ -512,8 +475,7 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
             res = analyze_mass_mixing(geom, m_N, U2, detector_positions,
                                       N_samples=N_samples, max_events=max_events,
                                       R_det=R_det, pixel_deg=pixel_deg, N_psi=N_psi,
-                                      uniform_n=uniform_n, uniform_gen=uniform_gen,
-                                      sampling=sampling)
+                                      uniform_n=uniform_n, uniform_gen=uniform_gen)
             for k in per_event_keys:
                 acc[k].append(res[k])
             meta[(m_N, U2)] = dict(interaction_probability=res["interaction_probability"],
@@ -533,8 +495,6 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
     flat["meta_cherenkov_weight"] = np.array([meta[k]["cherenkov_weight"] for k in mk])
     flat["meta_n_events"] = np.array([meta[k]["n_events"] for k in mk])
     flat["uniform_gen"] = bool(uniform_gen)
-    flat["sampling"] = (sampling if sampling is not None
-                        else ("uniform" if uniform_gen else "trunc_exp"))
     if output is not None:
         np.savez(output, **flat)
         print(f"Saved per-event image statistics to {output}  "

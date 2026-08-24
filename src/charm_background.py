@@ -53,8 +53,8 @@ from src.background import (sigma_CC_nu, atmospheric_column_depth_nucleons,
                            sample_interaction_altitude)
 # on-camera imaging (centroid) reused from the HNL imaging module, so the charm
 # on-camera muon separation is computed identically to the signal (uniform_n=N_AIR)
-from src.muon_image_spread import (muon_image_at_detector, two_muon_separation_deg,
-                                    centroid_to_pixel, PIXEL_DEG_DEFAULT)
+from src.muon_image_spread import (image_muons, centroid_to_pixel,
+                                    PIXEL_DEG_DEFAULT, IMAGE_MU_KEYS, IMAGE_PAIR_KEYS)
 
 PT = dataclasses.Particle.ParticleType
 
@@ -399,20 +399,19 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
 
     Returns
     -------
-    tuple
-        photon_counts        (N_det, N_samples)      total Cherenkov photons
-        mu_photon_counts     (2, N_det, N_samples)   per-muon (for both-tagging)
-        hadronic_photon_counts (N_det, N_samples)
-        interaction_weights  (N_samples,)   P_int * BR(D->mu) per event
-        N_nu_per_muon        float
-        cherenkov_weight     float
-        interaction_altitudes (N_samples,)
-        kinematics           dict of per-event arrays (for the HNL-vs-charm
-                             discriminator study): the two muon directions and
-                             energies, their lab OPENING ANGLE, the hadronic
-                             shower energy/direction, the neutrino energy, the
-                             interaction position, and the D decay length.  Zero
-                             for events that were not evaluated / had no dimuon.
+    out : dict of per-event arrays (length N_samples)
+        The mu1/mu2 photon-hit fields are the SAME unified schema the HNL signal
+        writes (built by muon_image_spread.image_muons), so signal and background
+        record identical per-muon information:
+            mu{1,2}_n_ph, mu{1,2}_pix (,2), mu{1,2}_cen (,3), mu{1,2}_rms_deg,
+            mu{1,2}_r90_deg, mu{1,2}_peak, mu{1,2}_in_pixel, mu{1,2}_det_z_km,
+            mu{1,2}_E, mu{1,2}_dir (,3)
+            opening_deg, opening_pixels, oncam_sep_deg, same_detector, both_detected
+        Charm ADDS the hadronic-shower fields and charm kinematics:
+            had_n_ph, had_pix (,2), had_cen (,3), had_E, had_dir (,3),
+            nu_energy, int_pos (,3), D_decay_length, D_code
+        plus the normalization: interaction_weights (P_int * BR(D->mu) *
+        position_weight), N_nu_per_muon, cherenkov_weight, interaction_altitudes.
     The expected number of tagged background events is
         N_nu_per_muon * N_muon_decays * <interaction_weights * 1(tag)>_MC
     (see ``summarize_charm_background``).
@@ -434,45 +433,50 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
     nu_energy, nu_dirs, _, _ = flux_geometry.sample_kinematics(
         prod_points[:, -1], E_muon_local, mode=mode)
 
-    photon_counts = np.zeros((N_det, N_samples))
-    mu_photon_counts = np.zeros((2, N_det, N_samples))
-    hadronic_photon_counts = np.zeros((N_det, N_samples))
     interaction_weights = np.zeros(N_samples)
     interaction_altitudes = np.zeros(N_samples)
 
-    # Per-event kinematics for the HNL-vs-charm discriminator study.
-    kin = dict(
-        mu1_dir=np.zeros((N_samples, 3)), mu2_dir=np.zeros((N_samples, 3)),
-        mu1_E=np.zeros(N_samples), mu2_E=np.zeros(N_samples),
-        opening_deg=np.full(N_samples, np.nan),
-        had_E=np.zeros(N_samples), had_dir=np.zeros((N_samples, 3)),
-        nu_energy=np.asarray(nu_energy, float).copy(),
-        int_pos=np.zeros((N_samples, 3)),
-        D_decay_length=np.zeros(N_samples), D_code=np.zeros(N_samples, dtype=int),
-        # measurable on-camera muon separation (both muons on ONE camera),
-        # computed identically to muon_image_spread's oncam_sep_deg
-        oncam_sep_deg=np.full(N_samples, np.nan),
-        same_detector=np.zeros(N_samples, dtype=bool),
-        # beam-axis-referenced camera pixel of each object (beam axis -> (0,0));
-        # NaN when not imaged.  The rejection handle for beam-collimated
-        # muon-decay-neutrino charm (mu1/mu2 = each muon's brightest camera;
-        # had = the diffuse shower's compact detected spot).
-        mu1_pixel=np.full((N_samples, 2), np.nan),
-        mu2_pixel=np.full((N_samples, 2), np.nan),
-        had_pixel=np.full((N_samples, 2), np.nan),
-        # photon-image centroid DIRECTION (unit vector) per object, so pixels
-        # can be re-derived at ANY density via centroid_to_pixel; NaN if unimaged.
-        mu1_centroid=np.full((N_samples, 3), np.nan),
-        mu2_centroid=np.full((N_samples, 3), np.nan),
-        had_centroid=np.full((N_samples, 3), np.nan),
-    )
+    # Unified per-event output.  The mu1/mu2 photon-hit fields are the SAME schema
+    # the HNL signal writes (built by muon_image_spread.image_muons); charm ADDS
+    # the hadronic-shower fields (had_*) and the charm kinematics.
+    out = {}
+    for key in IMAGE_MU_KEYS:                    # per-muon shared photon-hit fields
+        if key.endswith("_pix"):
+            out[key] = np.full((N_samples, 2), np.nan)
+        elif key.endswith("_cen") or key.endswith("_dir"):
+            out[key] = np.full((N_samples, 3), np.nan)
+        elif key.endswith("_n_ph"):
+            out[key] = np.zeros(N_samples)
+        elif key.endswith("_in_pixel"):
+            out[key] = np.zeros(N_samples, dtype=bool)
+        else:
+            out[key] = np.full(N_samples, np.nan)
+    out["opening_deg"] = np.full(N_samples, np.nan)
+    out["opening_pixels"] = np.full(N_samples, np.nan)
+    out["oncam_sep_deg"] = np.full(N_samples, np.nan)
+    out["same_detector"] = np.zeros(N_samples, dtype=bool)
+    out["both_detected"] = np.zeros(N_samples, dtype=bool)
+    # hadronic shower (charm-only): count + compact detected spot (see below)
+    out["had_n_ph"] = np.zeros(N_samples)
+    out["had_pix"] = np.full((N_samples, 2), np.nan)
+    out["had_cen"] = np.full((N_samples, 3), np.nan)
+    out["had_E"] = np.zeros(N_samples)
+    out["had_dir"] = np.full((N_samples, 3), np.nan)
+    # charm kinematics / interaction geometry
+    out["nu_energy"] = np.asarray(nu_energy, float).copy()
+    out["int_pos"] = np.full((N_samples, 3), np.nan)
+    out["D_decay_length"] = np.zeros(N_samples)
+    out["D_code"] = np.zeros(N_samples, dtype=int)
 
     # --- 3. Upward-going neutrinos only ---
     going_up = nu_dirs[:, 2] > 0
     upward_indices = np.where(going_up)[0]
     if len(upward_indices) == 0:
-        return (photon_counts, mu_photon_counts, hadronic_photon_counts,
-                interaction_weights, N_nu_per_muon, 1.0, interaction_altitudes, kin)
+        out["interaction_weights"] = interaction_weights
+        out["N_nu_per_muon"] = N_nu_per_muon
+        out["cherenkov_weight"] = 1.0
+        out["interaction_altitudes"] = interaction_altitudes
+        return out
 
     # --- 4. Interaction probability (charm fraction x total-CC prob) ---
     # Vectorized: charm fraction from the interpolation table, CC baseline and
@@ -503,7 +507,6 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
     for i_eval, idx in enumerate(eval_indices):
         position_weights[idx] = pos_weights_eval[i_eval]
 
-    muon_kin = ((0, "mu1_dir", "mu1_E"), (1, "mu2_dir", "mu2_E"))
     for i_eval, idx in enumerate(eval_indices):
         z_int = z_int_all[i_eval]
         interaction_altitudes[idx] = z_int
@@ -519,138 +522,73 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
         # fraction BR(D->mu) of charm events yield the second muon
         interaction_weights[idx] *= ev["weight"]
 
-        # record per-event kinematics (the discriminator handles)
-        n1 = ev["mu1_dir"] / np.linalg.norm(ev["mu1_dir"])
-        n2 = ev["mu2_dir"] / np.linalg.norm(ev["mu2_dir"])
-        kin["mu1_dir"][idx] = n1
-        kin["mu2_dir"][idx] = n2
-        kin["mu1_E"][idx] = ev["mu1_E"]
-        kin["mu2_E"][idx] = ev["mu2_E"]
-        kin["opening_deg"][idx] = np.degrees(
-            np.arccos(np.clip(n1 @ n2, -1.0, 1.0)))
-        kin["had_E"][idx] = ev["had_E"]
-        kin["had_dir"][idx] = ev["had_dir"]
-        kin["int_pos"][idx] = int_pos
-        kin["D_decay_length"][idx] = ev["decay_length"]
-        kin["D_code"][idx] = int(ev["D_type"])
+        # charm kinematics / interaction geometry
+        out["int_pos"][idx] = int_pos
+        out["had_E"][idx] = ev["had_E"]
+        out["had_dir"][idx] = np.asarray(ev["had_dir"], float)
+        out["D_decay_length"][idx] = ev["decay_length"]
+        out["D_code"][idx] = int(ev["D_type"])
 
-        valid_dets = [i for i, dp in enumerate(detector_positions)
-                      if z_int < dp[2]]
-        if not valid_dets:
-            continue
-        valid_det_pos = [detector_positions[i] for i in valid_dets]
+        # SHARED muon imaging -- identical per-muon photon-hit record to the HNL
+        # signal (image_muons: uniform_n=N_AIR + transmission, matching the
+        # analysis).  Fills mu1/mu2 counts, pixels, centroids, sizes, plus
+        # opening_deg/opening_pixels/oncam_sep_deg/same_detector/both_detected.
+        rec = image_muons(int_pos, (ev["mu1_dir"], ev["mu2_dir"]),
+                          (ev["mu1_E"], ev["mu2_E"]), detector_positions,
+                          R_det=R_det, N_psi=300, pixel_deg=pixel_deg,
+                          uniform_n=N_AIR)
+        if rec is not None:
+            for k in IMAGE_MU_KEYS + IMAGE_PAIR_KEYS:
+                out[k][idx] = rec[k]
 
-        # --- Cherenkov from each of the two muons ---
-        N_ph_by_muon = {}          # k -> photon counts over valid_dets
-        track_by_muon = {}         # k -> (mu_dir, E_mu, N_track) for re-imaging
-        for k, dir_key, E_key in muon_kin:
-            mu_dir = ev[dir_key]
-            E_mu = ev[E_key]
-            if mu_dir[2] <= 0 or E_mu < 0.1:
-                continue
-            dir_cosine = mu_dir[2]
-            zenith = np.arccos(np.clip(dir_cosine, -1.0, 1.0))
-            transmission = cherenkov_transmission(z_int, zenith)
-            track_length = muon_range_in_air(E_mu, z_int,
-                                             direction_cosine=dir_cosine)
-            if track_length <= 0:
-                continue
-            N_track = min(1000, max(300, int(track_length / 100)))
-            try:
-                N_ph = cherenkov_photons_multi_detector(
-                    int_pos, mu_dir, track_length, R_det,
-                    valid_det_pos, N_psi=300, N_track=N_track)
-                N_ph = np.asarray(N_ph) * transmission
-            except Exception:
-                N_ph = np.zeros(len(valid_dets))
-            for j, i_det in enumerate(valid_dets):
-                mu_photon_counts[k, i_det, idx] = N_ph[j]
-            N_ph_by_muon[k] = N_ph
-            track_by_muon[k] = (mu_dir, E_mu, N_track)
-
-        # --- per-muon camera pixel + measurable on-camera separation ---
-        # Each muon is imaged at its OWN brightest camera; its beam-axis-
-        # referenced pixel (beam axis -> (0,0)) is recorded.  When both muons are
-        # brightest on the SAME camera, the angle between the two centroids is
-        # the on-camera separation (matches muon_image_spread oncam_sep_deg).
-        # uniform_n=N_AIR matches the analysis Cherenkov model; the counts
-        # already carry transmission so apply_transmission=False.
-        best_det = {}
-        for k in N_ph_by_muon:
-            jk = int(np.argmax(N_ph_by_muon[k]))
-            if N_ph_by_muon[k][jk] > 0:
-                best_det[k] = jk
-        if 0 in best_det and 1 in best_det:
-            kin["same_detector"][idx] = bool(
-                valid_dets[best_det[0]] == valid_dets[best_det[1]])
-        cents = {}
-        for k in best_det:
-            mu_dir, E_mu, N_track = track_by_muon[k]
-            im = muon_image_at_detector(
-                int_pos, mu_dir, E_mu, detector_positions[valid_dets[best_det[k]]],
-                decay_altitude=z_int, R_det=R_det, N_psi=300, N_track=N_track,
-                apply_transmission=False, uniform_n=N_AIR)
-            if im is None:
-                continue
-            cents[k] = im["centroid"]
-            kin["mu%d_pixel" % (k + 1)][idx] = centroid_to_pixel(
-                im["centroid"], pixel_deg)
-            kin["mu%d_centroid" % (k + 1)][idx] = im["centroid"]
-        if 0 in cents and 1 in cents and kin["same_detector"][idx]:
-            kin["oncam_sep_deg"][idx] = two_muon_separation_deg(
-                cents[0], cents[1])
-
-        # --- Hadronic shower ---
+        # --- Hadronic shower (charm-only) ---
+        # sigma_had=10deg is only the EMISSION spread (sets the Gaussian
+        # acceptance / the COUNT); the detected light comes from the ~point-like
+        # shower, so it images to ~one beam-axis pixel at direction (det-int_pos).
+        # Record the count + spot at the brightest hadronic camera.
         if include_hadronic_shower and ev["had_E"] > 1.0:
-            had_by_det = {}
-            for i_det in valid_dets:
-                r_rel = int_pos - detector_positions[i_det]
-                cnt = hadronic_shower_cherenkov(
-                    ev["had_E"], ev["had_dir"], r_rel, z_int)
-                hadronic_photon_counts[i_det, idx] = cnt
-                had_by_det[i_det] = cnt
-            # sigma_had=10deg is only the EMISSION spread (sets the Gaussian
-            # acceptance / the COUNT); the detected light comes from the point
-            # shower, so it images to ~one beam-axis pixel at direction
-            # (det - int_pos).  Record it at the brightest hadronic camera.
-            if had_by_det:
-                i_bright = max(had_by_det, key=had_by_det.get)
-                if had_by_det[i_bright] > 0:
-                    d_arr = detector_positions[i_bright] - int_pos
-                    nrm = np.linalg.norm(d_arr)
-                    if nrm > 0:
-                        kin["had_pixel"][idx] = centroid_to_pixel(d_arr / nrm,
-                                                                  pixel_deg)
-                        kin["had_centroid"][idx] = d_arr / nrm
+            best_cnt, best_det = 0.0, None
+            for dp in detector_positions:
+                dp = np.asarray(dp, float)
+                if z_int >= dp[2]:
+                    continue
+                cnt = hadronic_shower_cherenkov(ev["had_E"], ev["had_dir"],
+                                                int_pos - dp, z_int)
+                if cnt > best_cnt:
+                    best_cnt, best_det = cnt, dp
+            if best_det is not None and best_cnt > 0:
+                out["had_n_ph"][idx] = best_cnt
+                d_arr = best_det - int_pos
+                nrm = np.linalg.norm(d_arr)
+                if nrm > 0:
+                    d_hat = d_arr / nrm
+                    out["had_cen"][idx] = d_hat
+                    out["had_pix"][idx] = centroid_to_pixel(d_hat, pixel_deg)
 
-    photon_counts = mu_photon_counts.sum(axis=0) + hadronic_photon_counts
-    return (photon_counts, mu_photon_counts, hadronic_photon_counts,
-            interaction_weights * position_weights, N_nu_per_muon,
-            cherenkov_weight, interaction_altitudes, kin)
+    out["interaction_weights"] = interaction_weights * position_weights
+    out["N_nu_per_muon"] = N_nu_per_muon
+    out["cherenkov_weight"] = cherenkov_weight
+    out["interaction_altitudes"] = interaction_altitudes
+    return out
 
 
-def summarize_charm_background(mu_photon_counts, interaction_weights,
-                               N_nu_per_muon, N_samples, min_photons=10,
-                               cherenkov_weight=1.0, both_muon_tag=True):
-    """Expected charm dimuon background events.
+def summarize_charm_background(out, N_samples, min_photons=10, both_muon_tag=True):
+    """Expected charm dimuon background events (scalar).
 
-        N_bg = N_nu_per_muon * N_muon_decays * <P_int * 1(tag)>_MC
+        N_bg = N_nu_per_muon * N_muon_decays * <interaction_weight * 1(tag)>_MC
 
-    Tag (default both-muon, the background-free-style sample): BOTH muons above
-    ``min_photons`` on the same detector.  Set ``both_muon_tag=False`` for the
-    single-muon (>=1 muon above threshold) tag.  Returns a length-N_det array.
-
-    mu_photon_counts : (2, N_det, N_samples)
+    Uses the unified per-muon best-camera counts (same tag as the HNL signal):
+    both muons above ``min_photons`` on the SAME camera (both_muon_tag=True), or
+    at least one muon above threshold (both_muon_tag=False).  ``out`` is the dict
+    returned by compute_charm_background_at_satellite.
     """
-    mu_photon_counts = np.asarray(mu_photon_counts)
-    _, N_det, _ = mu_photon_counts.shape
-    N_bg = np.zeros(N_det)
-    for i in range(N_det):
-        m0, m1 = mu_photon_counts[0, i], mu_photon_counts[1, i]
-        if both_muon_tag:
-            tagged = (m0 >= min_photons) & (m1 >= min_photons)
-        else:
-            tagged = (np.maximum(m0, m1) >= min_photons)
-        weighted = np.sum(interaction_weights[tagged]) * cherenkov_weight
-        N_bg[i] = N_nu_per_muon * N_muon_decays * weighted / N_samples
-    return N_bg
+    m0 = np.asarray(out["mu1_n_ph"], float)
+    m1 = np.asarray(out["mu2_n_ph"], float)
+    if both_muon_tag:
+        tagged = (m0 >= min_photons) & (m1 >= min_photons) \
+            & np.asarray(out["same_detector"], bool)
+    else:
+        tagged = np.maximum(m0, m1) >= min_photons
+    weighted = np.sum(np.asarray(out["interaction_weights"], float)[tagged]) \
+        * float(out["cherenkov_weight"])
+    return float(out["N_nu_per_muon"]) * N_muon_decays * weighted / N_samples

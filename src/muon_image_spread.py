@@ -351,6 +351,113 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
 
 
 # --------------------------------------------------------------------------- #
+# Shared muon-pair imaging (used by BOTH the HNL signal and the charm bkg so
+# they record identical per-muon photon-hit information)
+# --------------------------------------------------------------------------- #
+# Unified per-muon photon-hit fields (N in {1,2}) + two-muon pair quantities.
+# Both analyze_mass_mixing (HNL) and charm_background.compute_charm_background_at_satellite
+# build their per-event records from these exact keys.
+IMAGE_MU_FIELDS = ("n_ph", "pix", "cen", "rms_deg", "r90_deg", "peak",
+                   "in_pixel", "det_z_km", "E", "dir")
+IMAGE_MU_KEYS = tuple(f"mu{N}_{f}" for N in (1, 2) for f in IMAGE_MU_FIELDS)
+IMAGE_PAIR_KEYS = ("opening_deg", "opening_pixels", "oncam_sep_deg",
+                   "same_detector", "both_detected")
+IMAGE_KEYS = IMAGE_MU_KEYS + IMAGE_PAIR_KEYS
+# HNL-signal-specific per-event context stored alongside the shared image fields
+# (weight + reweighting inputs).  Charm stores its own context instead.
+HNL_CONTEXT_KEYS = ("weight", "hnl_energy", "decay_altitude", "decay_dist",
+                    "decay_length", "d_max", "decay_pos_probability", "sampling_pdf")
+
+
+def image_muons(vertex, mu_dirs, mu_energies, detector_positions,
+                R_det=R_DET_DEFAULT, N_psi=300, pixel_deg=PIXEL_DEG_DEFAULT,
+                uniform_n=None, N_track=None, E_min=0.1):
+    """Image a muon PAIR emitted from ``vertex`` and return the unified record.
+
+    Each muon is imaged with ``muon_image_at_detector`` (transmission applied) at
+    every detector above the vertex and assigned to its BRIGHTEST detector.  This
+    is the single source of truth for the per-muon photon-hit observables shared
+    by the HNL signal and the charm background, so the two are guaranteed
+    consistent (verified: the previous separate code paths agreed to machine
+    precision).  ``apply_transmission=True`` here scales only ``n_ph`` (the
+    centroid/rms/pixel are transmission-independent).
+
+    Returns None if NEITHER muon reaches a detector.  Otherwise a dict with, for
+    N in {1,2}:
+        muN_n_ph      photons on the disk (transmission applied); 0.0 if unimaged
+        muN_pix       (2,) camera pixel, beam-axis referenced; [nan,nan] if unimaged
+        muN_cen       (3,) photon-image centroid unit vector;   [nan]*3 if unimaged
+        muN_rms_deg, muN_r90_deg, muN_peak, muN_in_pixel   image compactness
+        muN_det_z_km  chosen detector beam-frame z [km];        nan if unimaged
+        muN_E         muon energy [GeV]
+        muN_dir       (3,) muon momentum unit vector
+    plus two-muon pair quantities:
+        opening_deg, opening_pixels, oncam_sep_deg, same_detector, both_detected
+    """
+    vertex = np.asarray(vertex, float)
+    alt = max(0.0, vertex[2])
+    dets_above = [np.asarray(d, float) for d in detector_positions
+                  if np.asarray(d, float)[2] > vertex[2]]
+    ims = [None, None]
+    best = [None, None]
+    for k in (0, 1):
+        E = float(mu_energies[k])
+        mu = np.asarray(mu_dirs[k], float)
+        if E < E_min:
+            continue
+        bim, bd = None, None
+        for d in dets_above:
+            im = muon_image_at_detector(vertex, mu, E, d, decay_altitude=alt,
+                                        R_det=R_det, N_psi=N_psi, N_track=N_track,
+                                        pixel_deg=pixel_deg, uniform_n=uniform_n)
+            if im is None:
+                continue
+            if bim is None or im["n_photons"] > bim["n_photons"]:
+                bim, bd = im, d
+        ims[k], best[k] = bim, bd
+    if ims[0] is None and ims[1] is None:
+        return None
+
+    rec = {}
+    for k in (0, 1):
+        im, bd, N = ims[k], best[k], k + 1
+        if im is not None:
+            cen = np.asarray(im["centroid"], float)
+            rec[f"mu{N}_n_ph"] = float(im["n_photons"])
+            rec[f"mu{N}_pix"] = np.asarray(centroid_to_pixel(cen, pixel_deg), float)
+            rec[f"mu{N}_cen"] = cen
+            rec[f"mu{N}_rms_deg"] = float(im["rms_deg"])
+            rec[f"mu{N}_r90_deg"] = float(im["r90_deg"])
+            rec[f"mu{N}_peak"] = float(im["peak_pixel_frac"])
+            rec[f"mu{N}_in_pixel"] = bool(im["in_one_pixel"])
+            rec[f"mu{N}_det_z_km"] = float(bd[2] / 1e3)
+        else:
+            rec[f"mu{N}_n_ph"] = 0.0
+            rec[f"mu{N}_pix"] = np.array([np.nan, np.nan])
+            rec[f"mu{N}_cen"] = np.array([np.nan, np.nan, np.nan])
+            rec[f"mu{N}_rms_deg"] = np.nan
+            rec[f"mu{N}_r90_deg"] = np.nan
+            rec[f"mu{N}_peak"] = np.nan
+            rec[f"mu{N}_in_pixel"] = False
+            rec[f"mu{N}_det_z_km"] = np.nan
+        mu = np.asarray(mu_dirs[k], float)
+        nrm = np.linalg.norm(mu)
+        rec[f"mu{N}_dir"] = mu / nrm if nrm > 0 else mu
+        rec[f"mu{N}_E"] = float(mu_energies[k])
+
+    n1, n2 = rec["mu1_dir"], rec["mu2_dir"]
+    both = (ims[0] is not None) and (ims[1] is not None)
+    same = both and (best[0] is best[1])
+    rec["opening_deg"] = float(np.degrees(np.arccos(np.clip(n1 @ n2, -1.0, 1.0))))
+    rec["opening_pixels"] = rec["opening_deg"] / pixel_deg
+    rec["same_detector"] = bool(same)
+    rec["both_detected"] = bool(both)
+    rec["oncam_sep_deg"] = (two_muon_separation_deg(ims[0]["centroid"], ims[1]["centroid"])
+                            if same else np.nan)
+    return rec
+
+
+# --------------------------------------------------------------------------- #
 # Per-(mass, mixing) analysis
 # --------------------------------------------------------------------------- #
 def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
@@ -377,15 +484,15 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
                       multiply by interaction_probability*BR_mumu*N_muon_decays
                       for an absolute event count.
         m_N, U2       broadcast scalars (for concatenating across a scan)
-        rms1_deg, rms2_deg, r90_1_deg, r90_2_deg   per-muon image size [deg]
-        peak1, peak2          brightest-pixel light fraction per muon
-        in_pixel1, in_pixel2  bool, muon image fits in one pixel
-        opening_deg, opening_pixels  two-muon lab opening angle (Fig 2 metric)
-        oncam_sep_deg         centroid separation when both share a detector (else NaN)
-        same_detector, both_detected  bools
-        n_ph1, n_ph2          photons per muon (after transmission)
-        E_mu1, E_mu2, hnl_energy, decay_altitude
-        det1_alt_km, det2_alt_km  altitude of each muon's chosen detector
+    The per-muon photon-hit fields are the SHARED unified schema (image_muons),
+    identical to what the charm background records (N in {1,2}):
+        muN_n_ph              photons per muon (transmission applied)
+        muN_pix (,2), muN_cen (,3)  camera pixel + centroid dir (beam-axis ref)
+        muN_rms_deg, muN_r90_deg, muN_peak, muN_in_pixel   image compactness
+        muN_det_z_km, muN_E, muN_dir (,3)   chosen detector, energy, momentum dir
+        opening_deg, opening_pixels, oncam_sep_deg, same_detector, both_detected
+    plus the HNL context: weight, hnl_energy, decay_altitude, and the reweight
+    inputs decay_dist/decay_length/d_max/decay_pos_probability/sampling_pdf.
     Plus scalars: interaction_probability, BR_mumu, cherenkov_weight, n_events.
     """
     kin = sample_dimuon_kinematics(geom, m_N, U2, detector_positions,
@@ -399,90 +506,27 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
         valid_idx = np.random.choice(valid_idx, max_events, replace=False)
         cherenkov_weight = len(np.where(kin["valid_decay"])[0]) / max_events
 
-    keys = ("weight", "rms1_deg", "rms2_deg", "r90_1_deg", "r90_2_deg",
-            "peak1", "peak2", "in_pixel1", "in_pixel2",
-            "opening_deg", "opening_pixels", "oncam_sep_deg",
-            "same_detector", "both_detected", "n_ph1", "n_ph2",
-            # camera pixel index of each muon spot, referenced to the beam axis
-            # (beam axis -> pixel (0,0)); NaN when that muon was not imaged.
-            "mu1_pix_x", "mu1_pix_y", "mu2_pix_x", "mu2_pix_y",
-            # photon-image centroid DIRECTION (unit vector) per muon, so pixels
-            # can be re-derived at ANY density via centroid_to_pixel; NaN if unimaged.
-            "mu1_cen_x", "mu1_cen_y", "mu1_cen_z",
-            "mu2_cen_x", "mu2_cen_y", "mu2_cen_z",
-            "E_mu1", "E_mu2", "hnl_energy", "decay_altitude",
-            "det1_alt_km", "det2_alt_km",
-            # reweighting inputs: sampling_pdf q(decay_dist) lets hnl_sensitivity
-            # reweight to any (m_N, U2) analytically as p_target/q
-            "decay_dist", "decay_length", "d_max", "decay_pos_probability",
-            "sampling_pdf")
+    keys = IMAGE_KEYS + HNL_CONTEXT_KEYS
     cols = {k: [] for k in keys}
-
-    def best_detector(mu_dir, E_mu, dp, alt, dets):
-        """Image mu at each detector above the decay; return (image, det) for
-        the detector with the most photons, or (None, None)."""
-        best_im, best_d = None, None
-        for d in dets:
-            im = muon_image_at_detector(dp, mu_dir, E_mu, d, alt, R_det, N_psi,
-                                        pixel_deg=pixel_deg, uniform_n=uniform_n)
-            if im is None:
-                continue
-            if best_im is None or im["n_photons"] > best_im["n_photons"]:
-                best_im, best_d = im, d
-        return best_im, best_d
 
     d1 = kin["dir_mu1"]; d2 = kin["dir_mu2"]
     for n_i, i in enumerate(valid_idx):
         if verbose and n_i % 500 == 0:      # throttle: '\r' floods redirected logs
             print(f"Processing event {n_i} out of {len(valid_idx)}...", end='\r')
         dp = kin["decay_points"][i]
-        alt = max(0.0, dp[2])
-        dets_above = [d for d in det_pos if d[2] > dp[2]]
-        if not dets_above:
+        # SHARED imaging: identical per-muon photon-hit record to the charm bkg.
+        rec = image_muons(dp, (d1[i], d2[i]),
+                          (kin["E_mu1"][i], kin["E_mu2"][i]), detector_positions,
+                          R_det=R_det, N_psi=N_psi, pixel_deg=pixel_deg,
+                          uniform_n=uniform_n)
+        if rec is None:                          # neither muon reached a detector
             continue
-        im1, det1 = best_detector(d1[i], kin["E_mu1"][i], dp, alt, dets_above)
-        im2, det2 = best_detector(d2[i], kin["E_mu2"][i], dp, alt, dets_above)
-        if im1 is None and im2 is None:
-            continue
-        # Lab opening angle between the two muon directions (Fig 2 metric).
-        n1 = d1[i] / np.linalg.norm(d1[i]); n2 = d2[i] / np.linalg.norm(d2[i])
-        opening = float(np.degrees(np.arccos(np.clip(n1 @ n2, -1.0, 1.0))))
-        both = (im1 is not None) and (im2 is not None)
-        same_det = both and det1 is det2
-        oncam = (two_muon_separation_deg(im1["centroid"], im2["centroid"])
-                 if same_det else np.nan)
-
+        for k in IMAGE_KEYS:
+            cols[k].append(rec[k])
         cols["weight"].append(kin["decay_probability"][i]
                               * kin["decay_pos_probability"][i] * cherenkov_weight)
-        cols["rms1_deg"].append(im1["rms_deg"] if im1 else np.nan)
-        cols["rms2_deg"].append(im2["rms_deg"] if im2 else np.nan)
-        cols["r90_1_deg"].append(im1["r90_deg"] if im1 else np.nan)
-        cols["r90_2_deg"].append(im2["r90_deg"] if im2 else np.nan)
-        cols["peak1"].append(im1["peak_pixel_frac"] if im1 else np.nan)
-        cols["peak2"].append(im2["peak_pixel_frac"] if im2 else np.nan)
-        cols["in_pixel1"].append(im1["in_one_pixel"] if im1 else False)
-        cols["in_pixel2"].append(im2["in_one_pixel"] if im2 else False)
-        cols["opening_deg"].append(opening)
-        cols["opening_pixels"].append(opening / pixel_deg)
-        cols["oncam_sep_deg"].append(oncam)
-        cols["same_detector"].append(bool(same_det))
-        cols["both_detected"].append(bool(both))
-        cols["n_ph1"].append(im1["n_photons"] if im1 else 0.0)
-        cols["n_ph2"].append(im2["n_photons"] if im2 else 0.0)
-        px1 = centroid_to_pixel(im1["centroid"], pixel_deg) if im1 else (np.nan, np.nan)
-        px2 = centroid_to_pixel(im2["centroid"], pixel_deg) if im2 else (np.nan, np.nan)
-        cols["mu1_pix_x"].append(px1[0]); cols["mu1_pix_y"].append(px1[1])
-        cols["mu2_pix_x"].append(px2[0]); cols["mu2_pix_y"].append(px2[1])
-        c1 = im1["centroid"] if im1 else (np.nan, np.nan, np.nan)
-        c2 = im2["centroid"] if im2 else (np.nan, np.nan, np.nan)
-        cols["mu1_cen_x"].append(c1[0]); cols["mu1_cen_y"].append(c1[1]); cols["mu1_cen_z"].append(c1[2])
-        cols["mu2_cen_x"].append(c2[0]); cols["mu2_cen_y"].append(c2[1]); cols["mu2_cen_z"].append(c2[2])
-        cols["E_mu1"].append(kin["E_mu1"][i])
-        cols["E_mu2"].append(kin["E_mu2"][i])
         cols["hnl_energy"].append(kin["hnl_energy"][i])
-        cols["decay_altitude"].append(alt)
-        cols["det1_alt_km"].append(det1[2] / 1e3 if det1 is not None else np.nan)
-        cols["det2_alt_km"].append(det2[2] / 1e3 if det2 is not None else np.nan)
+        cols["decay_altitude"].append(max(0.0, dp[2]))
         cols["decay_dist"].append(kin["decay_dist"][i])
         cols["decay_length"].append(kin["decay_length"][i])
         cols["d_max"].append(kin["d_max"][i])
@@ -498,7 +542,7 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
     out["cherenkov_weight"] = cherenkov_weight
     out["n_events"] = n_ev
     if verbose:
-        rms_all = np.concatenate([out["rms1_deg"], out["rms2_deg"]]) if n_ev else np.array([])
+        rms_all = np.concatenate([out["mu1_rms_deg"], out["mu2_rms_deg"]]) if n_ev else np.array([])
         med_rms = np.nanmedian(rms_all) if rms_all.size else np.nan
         med_open = np.nanmedian(out["opening_deg"]) if n_ev else np.nan
         fpix = np.nanmean(out["opening_pixels"] > 1) if n_ev else np.nan
@@ -533,18 +577,7 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
         geom = SIRENDimuonGeometry(E_mu=E_mu, dump_depth=dump_depth,
                                    dump_angle=dump_angle, nature=nature, seed=seed)
 
-    per_event_keys = ("weight", "m_N", "U2", "rms1_deg", "rms2_deg",
-                      "r90_1_deg", "r90_2_deg", "peak1", "peak2",
-                      "in_pixel1", "in_pixel2", "opening_deg", "opening_pixels",
-                      "oncam_sep_deg", "same_detector", "both_detected",
-                      "n_ph1", "n_ph2",
-                      "mu1_pix_x", "mu1_pix_y", "mu2_pix_x", "mu2_pix_y",
-                      "mu1_cen_x", "mu1_cen_y", "mu1_cen_z",
-                      "mu2_cen_x", "mu2_cen_y", "mu2_cen_z",
-                      "E_mu1", "E_mu2", "hnl_energy",
-                      "decay_altitude", "det1_alt_km", "det2_alt_km",
-                      "decay_dist", "decay_length", "d_max", "decay_pos_probability",
-                      "sampling_pdf")
+    per_event_keys = ("m_N", "U2") + IMAGE_KEYS + HNL_CONTEXT_KEYS
     acc = {k: [] for k in per_event_keys}
     meta = {}
     for m_N in masses:

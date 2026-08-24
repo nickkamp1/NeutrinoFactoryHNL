@@ -46,6 +46,7 @@ ALL_DETECTORS = [
     # 5 km station APPENDED so indices 0-8 (20/50/100 km) keep their meaning;
     # central 5 km detector = index 11.
     np.array([500, 0, 5000.0]), np.array([-500, 0, 5000.0]), np.array([0, 0, 5000.0]),
+    np.array([500, 0, 1000.0]), np.array([-500, 0, 1000.0]), np.array([0, 0, 1000.0]),
 ]
 # Single-detector mode via env DET_INDEX (0-11); unset -> full detector array.
 # Output filename gets a det<i> tag so single-detector files sit alongside the
@@ -60,11 +61,11 @@ else:
 # Detector radius (m): default 2 m; the campaign also runs R=4 m.  R=2 keeps the
 # original (untagged) file names; R=4 adds an "R4_" tag.
 R_DET = float(os.environ.get("R_DET", "2.0"))
-_r_tag = f"R{R_DET:g}_"
+_r_tag = f"R{R_DET:g}"
 FILE_TAG = f"{_det_tag}{_r_tag}"
 UNIFORM_N = N_AIR   # sea-level index, matching the analysis
 
-OUT_SUBDIR = f"scan_results_balloon_hnl{_det_tag}{_r_tag}"
+OUT_SUBDIR = f"scan_results_balloon_hnl_{_det_tag}{_r_tag}"
 
 # Finer mass grid for smooth sensitivity contours (the opening-angle discriminator
 # is m_N-dependent and CANNOT be reweighted across mass, so masses are simulated;

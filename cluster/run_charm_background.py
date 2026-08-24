@@ -47,7 +47,7 @@ E_MU = 5000                   # GeV
 DUMP_DEPTH = 100              # m
 DUMP_ANGLE = 1.53             # rad (nearly horizontal curved-Earth beam)
 NU_TYPE = Particle.ParticleType.NuMuBar
-INCLUDE_NC = True             # include NC charm in the charm fraction
+INCLUDE_NC = False             # include NC charm in the charm fraction
 INCLUDE_HADRONIC = True       # record + image the hadronic shower (discriminator)
 UNIFORM_GEN = True            # importance-sample interaction altitude
 MIN_PHOTONS_REPORT = 50.0     # threshold for the log-line N_bg (20 PE / 0.4)
@@ -87,10 +87,10 @@ else:
     _det_tag = f"_det{int(_DET_INDEX)}"
 N_DET = len(DETECTOR_POSITIONS)
 
-# Detector radius (m): default 2 m; the campaign also runs R=4 m.  R=2 keeps the
-# original (untagged) file names; R=4 adds an "_R4" tag.
+# Detector radius (m): default 2 m; the campaign also runs R=4 m.  Always tag R
+# (R2/R4) to match run_hnl_signal.py and the on-disk scan_results_balloon_charm_* dirs.
 R_DET = float(os.environ.get("R_DET", "2.0"))
-_r_tag = "" if abs(R_DET - 2.0) < 1e-9 else f"_R{R_DET:g}"
+_r_tag = f"_R{R_DET:g}"
 
 # Neutrino source: "scattering" (mu N -> nu_mu X in the dump, the default) or
 # "decay" (mu+ -> e+ nu_mu-bar nu_e).  The dimuon channel needs the muon-flavour
@@ -120,71 +120,40 @@ print(f"seed={seed}  N_samples={N_SAMPLES}  N_det={N_DET}  R_det={R_DET}  "
 sys.stdout.flush()
 
 t1 = time.time()
-(photon_counts,
- mu_photon_counts,
- hadronic_photon_counts,
- interaction_weights,
- N_nu_per_muon,
- cherenkov_weight,
- interaction_altitudes,
- kin) = compute_charm_background_at_satellite(
+out = compute_charm_background_at_satellite(
     geom, model=model, detector_positions=DETECTOR_POSITIONS,
     N_samples=N_SAMPLES, max_cherenkov_events=MAX_CHERENKOV_EVENTS,
     uniform_gen=UNIFORM_GEN, include_hadronic_shower=INCLUDE_HADRONIC,
     include_nc=INCLUDE_NC, R_det=R_DET, mode=CHARM_MODE)
 print(f"\nSimulation: {time.time()-t1:.1f}s  "
-      f"N_nu_per_muon={N_nu_per_muon:.3e}  cherenkov_weight={cherenkov_weight:.2f}")
+      f"N_nu_per_muon={out['N_nu_per_muon']:.3e}  "
+      f"cherenkov_weight={out['cherenkov_weight']:.2f}")
 
 # Quick N_bg for the log (both-muon and single-muon tag) at one threshold.
+# summarize_charm_background now takes the unified `out` dict and returns a scalar.
 N_bg_both = summarize_charm_background(
-    mu_photon_counts, interaction_weights, N_nu_per_muon, N_SAMPLES,
-    min_photons=MIN_PHOTONS_REPORT, cherenkov_weight=cherenkov_weight,
-    both_muon_tag=True)
+    out, N_SAMPLES, min_photons=MIN_PHOTONS_REPORT, both_muon_tag=True)
 N_bg_single = summarize_charm_background(
-    mu_photon_counts, interaction_weights, N_nu_per_muon, N_SAMPLES,
-    min_photons=MIN_PHOTONS_REPORT, cherenkov_weight=cherenkov_weight,
-    both_muon_tag=False)
-print(f"N_bg @ {MIN_PHOTONS_REPORT:.0f} photons  both-muon: max={N_bg_both.max():.3g}"
-      f"  single-muon: max={N_bg_single.max():.3g}")
+    out, N_SAMPLES, min_photons=MIN_PHOTONS_REPORT, both_muon_tag=False)
+print(f"N_bg @ {MIN_PHOTONS_REPORT:.0f} photons  both-muon: {N_bg_both:.3g}"
+      f"  single-muon: {N_bg_single:.3g}")
 
 outdir = os.path.join(project_root, "data", OUT_SUBDIR)
 os.makedirs(outdir, exist_ok=True)
 outfile = os.path.join(outdir, f"charm_bkg_seed_{seed:03d}.npz")
+# `out` carries the unified per-muon photon-hit schema (identical to the HNL
+# signal), plus the hadronic-shower fields, charm kinematics, and normalization
+# (interaction_weights, N_nu_per_muon, cherenkov_weight, interaction_altitudes).
 np.savez(
     outfile,
+    **out,
     seed=seed,
     N_samples=N_SAMPLES,
     detector_positions=np.array(DETECTOR_POSITIONS),
     E_mu=E_MU, dump_depth=DUMP_DEPTH, dump_angle=DUMP_ANGLE,
     include_nc=INCLUDE_NC, R_det=R_DET, mode=CHARM_MODE,
-    # --- signal-like photon arrays (tag with the same machinery as the dimuon) ---
-    photon_counts=photon_counts,               # (N_det, N_samples) both muons + shower
-    mu_photon_counts=mu_photon_counts,          # (2, N_det, N_samples) per-muon
-    hadronic_photon_counts=hadronic_photon_counts,  # (N_det, N_samples)
-    # --- normalization: N_bg = N_nu_per_muon * N_muon_decays * <w*1(tag)>/N ---
-    interaction_weights=interaction_weights,    # (N_samples,) P_int * BR(D->mu)
-    N_nu_per_muon=N_nu_per_muon,
-    cherenkov_weight=cherenkov_weight,
-    interaction_altitudes=interaction_altitudes,
-    # --- discriminator handles (HNL vs charm) ---
-    opening_deg=kin["opening_deg"],             # lab mu-mu opening angle [deg]
-    oncam_sep_deg=kin["oncam_sep_deg"],         # MEASURABLE on-camera separation [deg]
-    same_detector=kin["same_detector"],         # both muons brightest on one camera
-    # beam-axis-referenced camera pixel of each object (beam axis -> (0,0)) --
-    # the handle for rejecting beam-collimated muon-decay-neutrino charm
-    mu1_pixel=kin["mu1_pixel"], mu2_pixel=kin["mu2_pixel"],
-    had_pixel=kin["had_pixel"],
-    # centroid DIRECTION (unit vector) per object -> re-bin pixels at any density
-    mu1_centroid=kin["mu1_centroid"], mu2_centroid=kin["mu2_centroid"],
-    had_centroid=kin["had_centroid"],
     beam_axis_pixel=np.array([0.0, 0.0]),
     camera_optical_axis=np.array([0.0, 0.0, 1.0]),
-    mu1_dir=kin["mu1_dir"], mu2_dir=kin["mu2_dir"],
-    mu1_E=kin["mu1_E"], mu2_E=kin["mu2_E"],
-    had_E=kin["had_E"], had_dir=kin["had_dir"],
-    nu_energy=kin["nu_energy"],
-    int_pos=kin["int_pos"],
-    D_decay_length=kin["D_decay_length"], D_code=kin["D_code"],
 )
 print(f"Done! Saved to {outfile}")
 print(f"Total time: {time.time()-t0:.1f}s")

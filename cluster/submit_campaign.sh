@@ -3,7 +3,7 @@
 #
 # Matrix: detector DISTANCES {5, 20, 50, 100} km (central detectors 11/2/5/8 in
 # run_*.py's ALL_DETECTORS) x R_det {2, 4} m, for three samples each:
-#   * HNL signal            (23 masses, cluster/run_muon_image_spread.py)
+#   * HNL signal            (23 masses, cluster/run_hnl_signal.py)
 #   * charm scattering-nu   (50 seeds,  cluster/run_charm_background.py)
 #   * charm decay-nu (nu_mu-bar; 50 seeds, CHARM_MODE=decay)
 #
@@ -18,8 +18,8 @@ LOG=$ROOT/cluster/logs
 mkdir -p "$LOG"
 cd "$ROOT"
 
-# central detectors: 5 km -> 11, 20 km -> 2, 50 km -> 5, 100 km -> 8
-DETS=(11 2 5 8)
+# central detectors: 1 km ->14, 5 km -> 11, 20 km -> 2, 50 km -> 5, 100 km -> 8
+DETS=(14 11 2 5 8)
 RADII=(2 4)
 
 for R in "${RADII[@]}"; do
@@ -30,7 +30,7 @@ for R in "${RADII[@]}"; do
     sbatch --job-name="hnl_${tag}" --array=0-22 \
            --output="$LOG/img_${tag}_%a.out" --error="$LOG/img_${tag}_%a.err" \
            --export=ALL,DET_INDEX=$DET,R_DET=$R \
-           cluster/submit_muon_image_spread.sh
+           cluster/submit_hnl_signal.sh
 
     # --- charm scattering-neutrino background (50 seeds) ---
     sbatch --job-name="charm_${tag}" --array=0-49 \

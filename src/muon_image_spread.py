@@ -221,6 +221,27 @@ def two_muon_separation_deg(centroid1, centroid2):
     return float(np.degrees(np.arccos(c)))
 
 
+def centroid_to_pixel(centroid, pixel_deg=PIXEL_DEG_DEFAULT):
+    """Camera pixel index (float) of an imaged arrival-direction unit vector.
+
+    Every station is a downward-looking telescope (disk normal along -z), so the
+    camera optical axis is the beam axis +z.  The beam axis therefore maps to
+    pixel (0, 0), and "clustering around the beam axis" means small |pixel| --
+    the handle for rejecting beam-collimated muon-decay-neutrino backgrounds.
+    Camera axes are ex=[1,0,0], ey=[0,1,0]; pixel = degrees(atan2(c.e, c.z))/pixel_deg
+    (exact gnomonic; linear for the <2 deg offsets here).  Returns (px_x, px_y)
+    in pixel units, or (nan, nan) if the direction is missing or not upward.
+    """
+    if centroid is None:
+        return (np.nan, np.nan)
+    c = np.asarray(centroid, float)
+    if c[2] <= 0:
+        return (np.nan, np.nan)
+    dx_deg = np.degrees(np.arctan2(c[0], c[2]))
+    dy_deg = np.degrees(np.arctan2(c[1], c[2]))
+    return (dx_deg / pixel_deg, dy_deg / pixel_deg)
+
+
 # --------------------------------------------------------------------------- #
 # SIREN front-half: sample a set of dimuon events (mirrors
 # SIRENDimuonGeometry.compute_dimuon_signal_at_satellite up to the Cherenkov step)
@@ -382,6 +403,13 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
             "peak1", "peak2", "in_pixel1", "in_pixel2",
             "opening_deg", "opening_pixels", "oncam_sep_deg",
             "same_detector", "both_detected", "n_ph1", "n_ph2",
+            # camera pixel index of each muon spot, referenced to the beam axis
+            # (beam axis -> pixel (0,0)); NaN when that muon was not imaged.
+            "mu1_pix_x", "mu1_pix_y", "mu2_pix_x", "mu2_pix_y",
+            # photon-image centroid DIRECTION (unit vector) per muon, so pixels
+            # can be re-derived at ANY density via centroid_to_pixel; NaN if unimaged.
+            "mu1_cen_x", "mu1_cen_y", "mu1_cen_z",
+            "mu2_cen_x", "mu2_cen_y", "mu2_cen_z",
             "E_mu1", "E_mu2", "hnl_energy", "decay_altitude",
             "det1_alt_km", "det2_alt_km",
             # reweighting inputs: sampling_pdf q(decay_dist) lets hnl_sensitivity
@@ -441,6 +469,14 @@ def analyze_mass_mixing(geom, m_N, U2, detector_positions, N_samples=2000,
         cols["both_detected"].append(bool(both))
         cols["n_ph1"].append(im1["n_photons"] if im1 else 0.0)
         cols["n_ph2"].append(im2["n_photons"] if im2 else 0.0)
+        px1 = centroid_to_pixel(im1["centroid"], pixel_deg) if im1 else (np.nan, np.nan)
+        px2 = centroid_to_pixel(im2["centroid"], pixel_deg) if im2 else (np.nan, np.nan)
+        cols["mu1_pix_x"].append(px1[0]); cols["mu1_pix_y"].append(px1[1])
+        cols["mu2_pix_x"].append(px2[0]); cols["mu2_pix_y"].append(px2[1])
+        c1 = im1["centroid"] if im1 else (np.nan, np.nan, np.nan)
+        c2 = im2["centroid"] if im2 else (np.nan, np.nan, np.nan)
+        cols["mu1_cen_x"].append(c1[0]); cols["mu1_cen_y"].append(c1[1]); cols["mu1_cen_z"].append(c1[2])
+        cols["mu2_cen_x"].append(c2[0]); cols["mu2_cen_y"].append(c2[1]); cols["mu2_cen_z"].append(c2[2])
         cols["E_mu1"].append(kin["E_mu1"][i])
         cols["E_mu2"].append(kin["E_mu2"][i])
         cols["hnl_energy"].append(kin["hnl_energy"][i])
@@ -501,7 +537,11 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
                       "r90_1_deg", "r90_2_deg", "peak1", "peak2",
                       "in_pixel1", "in_pixel2", "opening_deg", "opening_pixels",
                       "oncam_sep_deg", "same_detector", "both_detected",
-                      "n_ph1", "n_ph2", "E_mu1", "E_mu2", "hnl_energy",
+                      "n_ph1", "n_ph2",
+                      "mu1_pix_x", "mu1_pix_y", "mu2_pix_x", "mu2_pix_y",
+                      "mu1_cen_x", "mu1_cen_y", "mu1_cen_z",
+                      "mu2_cen_x", "mu2_cen_y", "mu2_cen_z",
+                      "E_mu1", "E_mu2", "hnl_energy",
                       "decay_altitude", "det1_alt_km", "det2_alt_km",
                       "decay_dist", "decay_length", "d_max", "decay_pos_probability",
                       "sampling_pdf")
@@ -522,6 +562,11 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
                                    n_events=res["n_events"])
     flat = {k: (np.concatenate(v) if len(v) else np.array([])) for k, v in acc.items()}
     flat["pixel_deg"] = pixel_deg
+    # Camera pixel convention (see centroid_to_pixel): optical axis = beam axis
+    # = +z, so the beam axis is at pixel (0,0) for every station -- the origin
+    # for beam-axis-clustering cuts on the muon-decay-neutrino background.
+    flat["beam_axis_pixel"] = np.array([0.0, 0.0])
+    flat["camera_optical_axis"] = np.array([0.0, 0.0, 1.0])
     flat["masses"] = np.asarray(masses, float)
     flat["U2_grid"] = np.asarray(U2_grid, float)
     # meta as parallel arrays keyed by (m_N,U2)
@@ -532,6 +577,11 @@ def scan(masses, U2_grid, detector_positions=None, output=None,
     flat["meta_BR_mumu"] = np.array([meta[k]["BR_mumu"] for k in mk])
     flat["meta_cherenkov_weight"] = np.array([meta[k]["cherenkov_weight"] for k in mk])
     flat["meta_n_events"] = np.array([meta[k]["n_events"] for k in mk])
+    # N_samples = number of beam MC events THROWN per grid point (not just the
+    # imaged/valid subset in meta_n_events).  It is the correct outer normalization
+    # for the reweighted event rate (see hnl_sensitivity.reweight_hnl); without it,
+    # dividing by meta_n_events over-counts by N_samples/n_events (~25x).
+    flat["meta_N_samples"] = np.full(len(mk), float(N_samples))
     flat["uniform_gen"] = bool(uniform_gen)
     flat["sampling"] = (sampling if sampling is not None
                         else ("uniform" if uniform_gen else "trunc_exp"))

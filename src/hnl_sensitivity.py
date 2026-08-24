@@ -43,11 +43,13 @@ import numpy as np
 
 from src.constants import N_muon_decays
 
+from scipy.stats import poisson,norm
+
 # thresholds (12 PE / 0.4), matching charm_vs_hnl
 SIPM_PDE = 0.40
 MIN_PHOTOELECTRONS = 12.0
 MIN_PHOTONS_DEFAULT = MIN_PHOTOELECTRONS / SIPM_PDE   # 30 photons
-PIXEL_DEG = 0.3
+PIXEL_DEG = 0.15
 
 # nominal beam-dump config (matches the sims)
 E_MU, DUMP_DEPTH, DUMP_ANGLE = 5000.0, 100.0, 1.53
@@ -69,19 +71,19 @@ def default_bins(min_photons=MIN_PHOTONS_DEFAULT):
     Hadronic photons: 'no detectable shower' [0, threshold), then above-threshold
     bins (which carry no signal but bound the charm shower).
     """
-    sep_edges = np.concatenate([[0.0, PIXEL_DEG],
+    sep_edges = np.concatenate([#[0.0, PIXEL_DEG],
                                 np.logspace(np.log10(PIXEL_DEG), np.log10(6.0), 7)[1:]])
-    had_edges = np.array([0.0, min_photons, 3 * min_photons, 10 * min_photons, np.inf])
+    had_edges = np.array([0.0, min_photons])#, 3 * min_photons, 10 * min_photons, np.inf])
     return sep_edges, had_edges
 
 
 # --------------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------------- #
-def load_charm_2d(detector, min_photons=MIN_PHOTONS_DEFAULT, data_dir="data"):
+def load_charm_2d(detector, R4=False, min_photons=MIN_PHOTONS_DEFAULT, data_dir="data"):
     """Charm background per-event (sep, had_photons, weight) for tagged events on
     one detector.  Returns arrays; weights are absolute expected events."""
-    cdir = os.path.join(data_dir, f"scan_results_balloon_charm_det{detector}")
+    cdir = os.path.join(data_dir, f"scan_results_balloon_charm_det{detector}_{'R4' if R4 else ''}")
     files = sorted(glob.glob(os.path.join(cdir, "charm_bkg_seed_*.npz")))
     if not files:
         raise FileNotFoundError(f"no charm files in {cdir}")
@@ -105,10 +107,10 @@ def load_charm_2d(detector, min_photons=MIN_PHOTONS_DEFAULT, data_dir="data"):
     return (np.concatenate(sep), np.concatenate(had), np.concatenate(w))
 
 
-def load_hnl_ref(mass, detector, data_dir="data"):
+def load_hnl_ref(mass, detector, R4=False, data_dir="data"):
     """HNL reference events (uniform_gen) for one mass/detector: the reweight
     inputs + on-camera separation for tagged (both-muon, same-camera) events."""
-    path = os.path.join(data_dir, f"muon_image_spread_det{detector}_{mass:.0f}.npz")
+    path = os.path.join(data_dir, f"scan_results_balloon_hnl/muon_image_spread_det{detector}_{'R4_' if R4 else ''}{mass:.0f}.npz")
     d = np.load(path, allow_pickle=True)
     return d
 
@@ -155,9 +157,20 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
     ip = float(geom.compute_weighted_production_rate(m_N, U2)[0])
     br = float(np.ravel(ref["meta_BR_mumu"])[0])
     cw = float(np.ravel(ref["meta_cherenkov_weight"])[0])
-    ne = float(np.ravel(ref["meta_n_events"])[0])
-    w = (decay_prob * dpp * ip * br * N_muon_decays * cw / ne
-         if ne > 0 else np.zeros_like(d))
+    # Normalize by N_samples (beam MC events THROWN), NOT meta_n_events (the
+    # imaged/valid subset): the cherenkov_weight cw already rescales the imaged
+    # sample up to the full valid sample, and the Monte-Carlo estimator of the
+    # expected event rate divides by the total number thrown.  Dividing by
+    # meta_n_events instead over-counts by N_samples/n_events (~25x), which
+    # matches Balloon.ipynb's sig_events_extrapolated to ~10% once corrected.
+    # Older files predate meta_N_samples; they were all generated with the
+    # run_muon_image_spread.py driver at N_samples=1e6, so fall back to that.
+    if "meta_N_samples" in ref:
+        ns = float(np.ravel(ref["meta_N_samples"])[0])
+    else:
+        ns = 1.0e6
+    w = (decay_prob * dpp * ip * br * N_muon_decays * cw / ns
+         if ns > 0 else np.zeros_like(d))
     both = ((np.asarray(ref["n_ph1"]) >= min_photons)
             & (np.asarray(ref["n_ph2"]) >= min_photons)
             & np.asarray(ref["same_detector"], bool)
@@ -202,11 +215,11 @@ def asimov_Z(s, b):
 
 
 class SensitivityModel:
-    """2D-likelihood HNL sensitivity for one detector."""
+    """1D-likelihood HNL sensitivity for one detector."""
 
     def __init__(self, detector=8, masses=(5, 10, 20, 30, 50),
                  min_photons=MIN_PHOTONS_DEFAULT, data_dir="data",
-                 U2_grid=None):
+                 U2_grid=None, R4=False):
         self.detector = detector
         self.masses = list(masses)
         self.min_photons = min_photons
@@ -216,25 +229,24 @@ class SensitivityModel:
         self.sep_edges, self.had_edges = default_bins(min_photons)
         self.geom = _geom()
         # charm background (fixed), 2D histogram
-        cs, ch, cw = load_charm_2d(detector, min_photons, data_dir)
-        self.B, _, _ = np.histogram2d(cs, ch, [self.sep_edges, self.had_edges],
-                                      weights=cw)
+        cs, ch, cw = load_charm_2d(detector, R4=R4, min_photons=min_photons, data_dir=data_dir)
+        self.B, _ = np.histogram(cs, self.sep_edges, weights=(cw*(ch<min_photons)))
         self.B_total = float(cw.sum())
-        self.refs = {m: load_hnl_ref(m, detector, data_dir) for m in self.masses}
+        self.refs = {m: load_hnl_ref(m, detector, R4=R4, data_dir=data_dir) for m in self.masses}
 
     def signal_hist(self, m_N, U2):
-        """2D signal histogram (all in the had=0 column)."""
+        """1D signal histogram."""
         sep, w = reweight_hnl(self.geom, self.refs[m_N], m_N, U2, self.min_photons)
-        S, _, _ = np.histogram2d(sep, np.zeros_like(sep),
-                                 [self.sep_edges, self.had_edges], weights=w)
-        return S, float(w.sum())
+        S, _ = np.histogram(sep, self.sep_edges, weights=w)
+        return S, float(S.sum())
 
     def significance_grid(self):
-        """Z(m_N, U2) for the 2D likelihood and for a plain count (no
+        """Z(m_N, U2) for the 1D likelihood and for a plain count (no
         discriminator).  Returns dict of (n_mass, n_U2) arrays."""
         Z2d = np.zeros((len(self.masses), len(self.U2_grid)))
         Zcount = np.zeros_like(Z2d)
         Stot = np.zeros_like(Z2d)
+        BackgroundFree = np.zeros_like(Z2d)
         for i, m in enumerate(self.masses):
             for j, U2 in enumerate(self.U2_grid):
                 S, s_tot = self.signal_hist(m, U2)
@@ -242,8 +254,12 @@ class SensitivityModel:
                 # counting: total tagged S vs total tagged B (single bin)
                 Zcount[i, j] = asimov_Z([s_tot], [self.B_total])
                 Stot[i, j] = s_tot
+                if s_tot < 30:
+                    BackgroundFree[i, j] = norm.isf(poisson.cdf(0, s_tot))
+                else:
+                    BackgroundFree[i, j] = np.sqrt(s_tot)
         return dict(masses=np.array(self.masses, float), U2=self.U2_grid,
-                    Z2d=Z2d, Zcount=Zcount, S_total=Stot)
+                    Z2d=Z2d, Zcount=Zcount, S_total=Stot, BackgroundFree=BackgroundFree)
 
     def contour(self, grid=None, Z_level=2.0, key="Z2d"):
         """U2 exclusion/discovery reach vs mass: the LOWEST U2 where Z crosses

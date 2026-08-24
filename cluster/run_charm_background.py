@@ -46,7 +46,7 @@ MAX_CHERENKOV_EVENTS = 50000  # cap on expensive SIREN+Cherenkov evals; the tiny
 E_MU = 5000                   # GeV
 DUMP_DEPTH = 100              # m
 DUMP_ANGLE = 1.53             # rad (nearly horizontal curved-Earth beam)
-NU_TYPE = Particle.ParticleType.NuMu  # beam-decay muon neutrinos
+NU_TYPE = Particle.ParticleType.NuMuBar
 INCLUDE_NC = True             # include NC charm in the charm fraction
 INCLUDE_HADRONIC = True       # record + image the hadronic shower (discriminator)
 UNIFORM_GEN = True            # importance-sample interaction altitude
@@ -64,6 +64,14 @@ ALL_DETECTORS = [
     np.array([500, 0, 100000.0]),
     np.array([-500, 0, 100000.0]),
     np.array([0, 0, 100000.0]),
+    # 5 km and 1 km station added for the expanded campaign, APPENDED so that indices
+    # 0-8 (20/50/100 km) keep their meaning.  Central 5 km detector = index 11.
+    np.array([500, 0, 5000.0]),
+    np.array([-500, 0, 5000.0]),
+    np.array([0, 0, 5000.0]),
+    np.array([500, 0, 1000.0]),
+    np.array([-500, 0, 1000.0]),
+    np.array([0, 0, 1000.0]),
 ]
 
 # Single-detector mode: set env DET_INDEX to a detector index (0-8) to run with
@@ -73,11 +81,28 @@ ALL_DETECTORS = [
 _DET_INDEX = os.environ.get("DET_INDEX", "")
 if _DET_INDEX == "":
     DETECTOR_POSITIONS = ALL_DETECTORS
-    OUT_SUBDIR = "scan_results_balloon_charm"
+    _det_tag = ""
 else:
     DETECTOR_POSITIONS = [ALL_DETECTORS[int(_DET_INDEX)]]
-    OUT_SUBDIR = f"scan_results_balloon_charm_det{int(_DET_INDEX)}"
+    _det_tag = f"_det{int(_DET_INDEX)}"
 N_DET = len(DETECTOR_POSITIONS)
+
+# Detector radius (m): default 2 m; the campaign also runs R=4 m.  R=2 keeps the
+# original (untagged) file names; R=4 adds an "_R4" tag.
+R_DET = float(os.environ.get("R_DET", "2.0"))
+_r_tag = "" if abs(R_DET - 2.0) < 1e-9 else f"_R{R_DET:g}"
+
+# Neutrino source: "scattering" (mu N -> nu_mu X in the dump, the default) or
+# "decay" (mu+ -> e+ nu_mu-bar nu_e).  The dimuon channel needs the muon-flavour
+# neutrino, which for a mu+ beam is nu_mu-bar, so decay mode uses NuMuBar.
+CHARM_MODE = os.environ.get("CHARM_MODE", "scattering")
+
+if CHARM_MODE == "decay":
+    _mode_tag = "_decay"
+else:
+    _mode_tag = "_scattering"
+
+OUT_SUBDIR = f"scan_results_balloon_charm{_mode_tag}{_det_tag}{_r_tag}"
 
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 if len(sys.argv) > 2:
@@ -90,8 +115,8 @@ t0 = time.time()
 geom = HNLFluxGeometry(E_mu=E_MU, dump_depth=DUMP_DEPTH, dump_angle=DUMP_ANGLE)
 model = CharmDISModel(nu_type=NU_TYPE, include_nc=INCLUDE_NC, seed=seed)
 print(f"Setup (geometry + charm splines): {time.time()-t0:.1f}s")
-print(f"seed={seed}  N_samples={N_SAMPLES}  N_det={N_DET}  "
-      f"max_cherenkov_events={MAX_CHERENKOV_EVENTS}")
+print(f"seed={seed}  N_samples={N_SAMPLES}  N_det={N_DET}  R_det={R_DET}  "
+      f"mode={CHARM_MODE}  nu_type={NU_TYPE}  max_cherenkov_events={MAX_CHERENKOV_EVENTS}")
 sys.stdout.flush()
 
 t1 = time.time()
@@ -106,7 +131,7 @@ t1 = time.time()
     geom, model=model, detector_positions=DETECTOR_POSITIONS,
     N_samples=N_SAMPLES, max_cherenkov_events=MAX_CHERENKOV_EVENTS,
     uniform_gen=UNIFORM_GEN, include_hadronic_shower=INCLUDE_HADRONIC,
-    include_nc=INCLUDE_NC)
+    include_nc=INCLUDE_NC, R_det=R_DET, mode=CHARM_MODE)
 print(f"\nSimulation: {time.time()-t1:.1f}s  "
       f"N_nu_per_muon={N_nu_per_muon:.3e}  cherenkov_weight={cherenkov_weight:.2f}")
 
@@ -131,7 +156,7 @@ np.savez(
     N_samples=N_SAMPLES,
     detector_positions=np.array(DETECTOR_POSITIONS),
     E_mu=E_MU, dump_depth=DUMP_DEPTH, dump_angle=DUMP_ANGLE,
-    include_nc=INCLUDE_NC,
+    include_nc=INCLUDE_NC, R_det=R_DET, mode=CHARM_MODE,
     # --- signal-like photon arrays (tag with the same machinery as the dimuon) ---
     photon_counts=photon_counts,               # (N_det, N_samples) both muons + shower
     mu_photon_counts=mu_photon_counts,          # (2, N_det, N_samples) per-muon
@@ -145,6 +170,15 @@ np.savez(
     opening_deg=kin["opening_deg"],             # lab mu-mu opening angle [deg]
     oncam_sep_deg=kin["oncam_sep_deg"],         # MEASURABLE on-camera separation [deg]
     same_detector=kin["same_detector"],         # both muons brightest on one camera
+    # beam-axis-referenced camera pixel of each object (beam axis -> (0,0)) --
+    # the handle for rejecting beam-collimated muon-decay-neutrino charm
+    mu1_pixel=kin["mu1_pixel"], mu2_pixel=kin["mu2_pixel"],
+    had_pixel=kin["had_pixel"],
+    # centroid DIRECTION (unit vector) per object -> re-bin pixels at any density
+    mu1_centroid=kin["mu1_centroid"], mu2_centroid=kin["mu2_centroid"],
+    had_centroid=kin["had_centroid"],
+    beam_axis_pixel=np.array([0.0, 0.0]),
+    camera_optical_axis=np.array([0.0, 0.0, 1.0]),
     mu1_dir=kin["mu1_dir"], mu2_dir=kin["mu2_dir"],
     mu1_E=kin["mu1_E"], mu2_E=kin["mu2_E"],
     had_E=kin["had_E"], had_dir=kin["had_dir"],

@@ -53,7 +53,8 @@ from src.background import (sigma_CC_nu, atmospheric_column_depth_nucleons,
                            sample_interaction_altitude)
 # on-camera imaging (centroid) reused from the HNL imaging module, so the charm
 # on-camera muon separation is computed identically to the signal (uniform_n=N_AIR)
-from src.muon_image_spread import muon_image_at_detector, two_muon_separation_deg
+from src.muon_image_spread import (muon_image_at_detector, two_muon_separation_deg,
+                                    centroid_to_pixel, PIXEL_DEG_DEFAULT)
 
 PT = dataclasses.Particle.ParticleType
 
@@ -380,6 +381,8 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
                                           uniform_gen=False,
                                           include_hadronic_shower=True,
                                           include_nc=True,
+                                          R_det=R_det,
+                                          pixel_deg=PIXEL_DEG_DEFAULT,
                                           mode="scattering"):
     """Charm dimuon background at the detector(s), per (event, detector).
 
@@ -450,6 +453,18 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
         # computed identically to muon_image_spread's oncam_sep_deg
         oncam_sep_deg=np.full(N_samples, np.nan),
         same_detector=np.zeros(N_samples, dtype=bool),
+        # beam-axis-referenced camera pixel of each object (beam axis -> (0,0));
+        # NaN when not imaged.  The rejection handle for beam-collimated
+        # muon-decay-neutrino charm (mu1/mu2 = each muon's brightest camera;
+        # had = the diffuse shower's compact detected spot).
+        mu1_pixel=np.full((N_samples, 2), np.nan),
+        mu2_pixel=np.full((N_samples, 2), np.nan),
+        had_pixel=np.full((N_samples, 2), np.nan),
+        # photon-image centroid DIRECTION (unit vector) per object, so pixels
+        # can be re-derived at ANY density via centroid_to_pixel; NaN if unimaged.
+        mu1_centroid=np.full((N_samples, 3), np.nan),
+        mu2_centroid=np.full((N_samples, 3), np.nan),
+        had_centroid=np.full((N_samples, 3), np.nan),
     )
 
     # --- 3. Upward-going neutrinos only ---
@@ -553,39 +568,60 @@ def compute_charm_background_at_satellite(flux_geometry, model=None,
             N_ph_by_muon[k] = N_ph
             track_by_muon[k] = (mu_dir, E_mu, N_track)
 
-        # --- measurable on-camera separation: both muons' brightest detector ---
-        # If both muons are brightest on the SAME camera, image each there and
-        # take the angle between the two image centroids (matches muon_image_spread
-        # oncam_sep_deg; uniform_n=N_AIR to match the analysis Cherenkov model).
-        if 0 in N_ph_by_muon and 1 in N_ph_by_muon:
-            j0 = int(np.argmax(N_ph_by_muon[0]))
-            j1 = int(np.argmax(N_ph_by_muon[1]))
-            if N_ph_by_muon[0][j0] > 0 and N_ph_by_muon[1][j1] > 0:
-                same = valid_dets[j0] == valid_dets[j1]
-                kin["same_detector"][idx] = bool(same)
-                if same:
-                    det = detector_positions[valid_dets[j0]]
-                    cents, ok = [], True
-                    for k in (0, 1):
-                        mu_dir, E_mu, N_track = track_by_muon[k]
-                        im = muon_image_at_detector(
-                            int_pos, mu_dir, E_mu, det, decay_altitude=z_int,
-                            R_det=R_det, N_psi=300, N_track=N_track,
-                            apply_transmission=False, uniform_n=N_AIR)
-                        if im is None:
-                            ok = False
-                            break
-                        cents.append(im["centroid"])
-                    if ok:
-                        kin["oncam_sep_deg"][idx] = two_muon_separation_deg(
-                            cents[0], cents[1])
+        # --- per-muon camera pixel + measurable on-camera separation ---
+        # Each muon is imaged at its OWN brightest camera; its beam-axis-
+        # referenced pixel (beam axis -> (0,0)) is recorded.  When both muons are
+        # brightest on the SAME camera, the angle between the two centroids is
+        # the on-camera separation (matches muon_image_spread oncam_sep_deg).
+        # uniform_n=N_AIR matches the analysis Cherenkov model; the counts
+        # already carry transmission so apply_transmission=False.
+        best_det = {}
+        for k in N_ph_by_muon:
+            jk = int(np.argmax(N_ph_by_muon[k]))
+            if N_ph_by_muon[k][jk] > 0:
+                best_det[k] = jk
+        if 0 in best_det and 1 in best_det:
+            kin["same_detector"][idx] = bool(
+                valid_dets[best_det[0]] == valid_dets[best_det[1]])
+        cents = {}
+        for k in best_det:
+            mu_dir, E_mu, N_track = track_by_muon[k]
+            im = muon_image_at_detector(
+                int_pos, mu_dir, E_mu, detector_positions[valid_dets[best_det[k]]],
+                decay_altitude=z_int, R_det=R_det, N_psi=300, N_track=N_track,
+                apply_transmission=False, uniform_n=N_AIR)
+            if im is None:
+                continue
+            cents[k] = im["centroid"]
+            kin["mu%d_pixel" % (k + 1)][idx] = centroid_to_pixel(
+                im["centroid"], pixel_deg)
+            kin["mu%d_centroid" % (k + 1)][idx] = im["centroid"]
+        if 0 in cents and 1 in cents and kin["same_detector"][idx]:
+            kin["oncam_sep_deg"][idx] = two_muon_separation_deg(
+                cents[0], cents[1])
 
         # --- Hadronic shower ---
         if include_hadronic_shower and ev["had_E"] > 1.0:
+            had_by_det = {}
             for i_det in valid_dets:
                 r_rel = int_pos - detector_positions[i_det]
-                hadronic_photon_counts[i_det, idx] = hadronic_shower_cherenkov(
+                cnt = hadronic_shower_cherenkov(
                     ev["had_E"], ev["had_dir"], r_rel, z_int)
+                hadronic_photon_counts[i_det, idx] = cnt
+                had_by_det[i_det] = cnt
+            # sigma_had=10deg is only the EMISSION spread (sets the Gaussian
+            # acceptance / the COUNT); the detected light comes from the point
+            # shower, so it images to ~one beam-axis pixel at direction
+            # (det - int_pos).  Record it at the brightest hadronic camera.
+            if had_by_det:
+                i_bright = max(had_by_det, key=had_by_det.get)
+                if had_by_det[i_bright] > 0:
+                    d_arr = detector_positions[i_bright] - int_pos
+                    nrm = np.linalg.norm(d_arr)
+                    if nrm > 0:
+                        kin["had_pixel"][idx] = centroid_to_pixel(d_arr / nrm,
+                                                                  pixel_deg)
+                        kin["had_centroid"][idx] = d_arr / nrm
 
     photon_counts = mu_photon_counts.sum(axis=0) + hadronic_photon_counts
     return (photon_counts, mu_photon_counts, hadronic_photon_counts,

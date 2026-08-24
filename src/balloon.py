@@ -429,7 +429,7 @@ class HNLFluxGeometry:
             position_weights = decay_coefficient_local * ds
 
         # Integrated production rate: N = sum(decay or scattering length * ds)
-        interaction_probability = np.sum(position_weights * ds)
+        interaction_probability = np.sum(position_weights)
 
         total = np.sum(position_weights)
         if total > 0:

@@ -165,7 +165,7 @@ def load_hnl(mass, hnl_dir=HNL_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
     ev_mN, ev_U2 = np.asarray(d["m_N"]), np.asarray(d["U2"])
     gk_mN = np.ravel(d["meta_m_N"]); gk_U2 = np.ravel(d["meta_U2"])
     g_ip = np.ravel(d["meta_interaction_probability"])
-    g_br = np.ravel(d["meta_BR_mumu"]); g_ne = np.ravel(d["meta_n_events"])
+    g_br = np.ravel(d["meta_BR_mumu"]); g_ne = np.ravel(d["meta_N_samples"])
     w_all = np.zeros(len(ev_mN))
     for gi in range(len(gk_mN)):
         m = np.isclose(ev_mN, gk_mN[gi], atol=0) & \

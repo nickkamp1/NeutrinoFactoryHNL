@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hnl_img_spread
 #SBATCH --partition=serial_requeue,shared,sapphire,arguelles_delgado
-#SBATCH --array=0-15
+#SBATCH --array=0-22
 #SBATCH --time=0-4:00:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=8
@@ -18,4 +18,4 @@ spack env activate lienv
 
 cd /n/holylfs05/LABS/arguelles_delgado_lab/Everyone/nkamp/Pheno/HNLs/NeutrinoFactoryHNL
 
-python cluster/run_muon_image_spread.py $SLURM_ARRAY_TASK_ID
+python cluster/run_hnl_signal.py $SLURM_ARRAY_TASK_ID

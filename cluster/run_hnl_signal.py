@@ -43,18 +43,28 @@ ALL_DETECTORS = [
     np.array([500, 0, 20000.0]), np.array([-500, 0, 20000.0]), np.array([0, 0, 20000.0]),
     np.array([500, 0, 50000.0]), np.array([-500, 0, 50000.0]), np.array([0, 0, 50000.0]),
     np.array([500, 0, 100000.0]), np.array([-500, 0, 100000.0]), np.array([0, 0, 100000.0]),
+    # 5 km station APPENDED so indices 0-8 (20/50/100 km) keep their meaning;
+    # central 5 km detector = index 11.
+    np.array([500, 0, 5000.0]), np.array([-500, 0, 5000.0]), np.array([0, 0, 5000.0]),
 ]
-# Single-detector mode via env DET_INDEX (0-8); unset -> full 9-detector array.
+# Single-detector mode via env DET_INDEX (0-11); unset -> full detector array.
 # Output filename gets a det<i> tag so single-detector files sit alongside the
 # aggregate ones (src/charm_vs_hnl.py toggles between them).
 _DET_INDEX = os.environ.get("DET_INDEX", "")
 if _DET_INDEX == "":
     DETECTOR_POSITIONS = ALL_DETECTORS
-    FILE_TAG = ""
+    _det_tag = ""
 else:
     DETECTOR_POSITIONS = [ALL_DETECTORS[int(_DET_INDEX)]]
-    FILE_TAG = f"det{int(_DET_INDEX)}_"
+    _det_tag = f"det{int(_DET_INDEX)}_"
+# Detector radius (m): default 2 m; the campaign also runs R=4 m.  R=2 keeps the
+# original (untagged) file names; R=4 adds an "R4_" tag.
+R_DET = float(os.environ.get("R_DET", "2.0"))
+_r_tag = f"R{R_DET:g}_"
+FILE_TAG = f"{_det_tag}{_r_tag}"
 UNIFORM_N = N_AIR   # sea-level index, matching the analysis
+
+OUT_SUBDIR = f"scan_results_balloon_hnl{_det_tag}{_r_tag}"
 
 # Finer mass grid for smooth sensitivity contours (the opening-angle discriminator
 # is m_N-dependent and CANNOT be reweighted across mass, so masses are simulated;
@@ -78,10 +88,15 @@ MAX_EVENTS = 50000    # cap on per-muon imaging evals (single detector is cheap)
 
 mass_idx = int(sys.argv[1])
 m_N = float(MASSES[mass_idx])
+# Optional overrides (smoke tests): argv[2]=N_samples, argv[3]=max_events.
+if len(sys.argv) > 2:
+    N_SAMPLES = int(float(sys.argv[2]))
+if len(sys.argv) > 3:
+    MAX_EVENTS = int(float(sys.argv[3]))
 
-outdir = os.path.join(project_root, "data")
+outdir = os.path.join(project_root, "data", OUT_SUBDIR)
 os.makedirs(outdir, exist_ok=True)
-out = os.path.join(outdir, f"muon_image_spread_{FILE_TAG}{m_N:.0f}.npz")
+out = os.path.join(outdir, f"hnl_signal_mN_{m_N:.0f}.npz")
 
 t0 = time.time()
 print(f"m_N = {m_N:.0f} GeV (mass index {mass_idx})")
@@ -91,6 +106,7 @@ sys.stdout.flush()
 
 scan([m_N], [U2_REF], detector_positions=DETECTOR_POSITIONS, output=out,
      N_samples=N_SAMPLES, max_events=MAX_EVENTS, uniform_n=UNIFORM_N,
+     R_det=R_DET,
      sampling="mixture")  # uniform(long-lived)+log-uniform(short-lived) -> covers
                           # BOTH sensitivity edges when reweighted to any (m_N,U2)
 

@@ -81,14 +81,14 @@ def load_charm(charm_dir=CHARM_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
     n_seeds = len(files)
 
     keep = {k: [] for k in ("opening_deg", "oncam_sep_deg", "had_E",
-                            "had_photons", "mu1_E", "mu2_E", "nu_energy", "weight")}
+                            "had_photons", "mu1_E", "mu2_E", "nu_energy", "weight", "mu1_pix", "mu2_pix", "mu1_dir", "mu2_dir", "mu1_n_ph", "mu2_n_ph")}
     for f in files:
         d = np.load(f)
-        mpc = d["mu_photon_counts"]          # (2, N_det, N_samples)
-        hpc = d["hadronic_photon_counts"]    # (N_det, N_samples)
+        mpc = np.array([d["mu1_n_ph"], d["mu2_n_ph"]])          # (2, N_det, N_samples)
+        hpc = d["had_n_ph"]    # (N_det, N_samples)
         N_samples = int(d["N_samples"])
-        both_thr = ((mpc[0].max(axis=0) >= min_photons)
-                    & (mpc[1].max(axis=0) >= min_photons))
+        both_thr = ((mpc[0] >= min_photons)
+                    & (mpc[1] >= min_photons))
         if tag == "kinematic":
             tagged = np.ones(mpc.shape[-1], dtype=bool)   # no detection cut
         elif tag == "same_detector":
@@ -103,7 +103,7 @@ def load_charm(charm_dir=CHARM_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
 
         # detected hadronic-shower photons = brightest hadronic signal on any
         # detector (the best case for a hadronic veto).
-        had_photons = np.asarray(hpc).max(axis=0)            # (N_samples,)
+        had_photons = np.asarray(hpc)         # (N_samples,)
 
         # physical rate weight per event (see module docstring), split /n_seeds
         w = (d["interaction_weights"] * float(d["N_nu_per_muon"])
@@ -115,8 +115,14 @@ def load_charm(charm_dir=CHARM_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
         keep["oncam_sep_deg"].append(np.asarray(d["oncam_sep_deg"])[sel])
         keep["had_E"].append(d["had_E"][sel])
         keep["had_photons"].append(had_photons[sel])
+        keep["mu1_n_ph"].append(d["mu1_n_ph"][sel])
+        keep["mu2_n_ph"].append(d["mu2_n_ph"][sel])
         keep["mu1_E"].append(d["mu1_E"][sel])
         keep["mu2_E"].append(d["mu2_E"][sel])
+        keep["mu1_dir"].append(d["mu1_dir"][sel])
+        keep["mu2_dir"].append(d["mu2_dir"][sel])
+        keep["mu1_pix"].append(np.asarray(d["mu1_pix"])[sel])
+        keep["mu2_pix"].append(np.asarray(d["mu2_pix"])[sel])
         keep["nu_energy"].append(d["nu_energy"][sel])
         keep["weight"].append(w[sel])
 
@@ -127,8 +133,7 @@ def load_charm(charm_dir=CHARM_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
 
 
 def load_hnl(mass, hnl_dir=HNL_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
-             tag="both_detected", u2min=None, u2max=None, select_u2="best",
-             file_tag=""):
+             tag="both_detected", u2min=None, u2max=None, select_u2="best"):
     """Load one HNL muon_image_spread file and return the tagged-event arrays.
 
     The per-event physical-rate weight is built per (m_N, U2) grid point
@@ -149,7 +154,7 @@ def load_hnl(mass, hnl_dir=HNL_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
     scalars ``m_N``, ``rate``, and ``U2_sel`` (the chosen U2, or None if pooled).
     The HNL leptonic decay has NO hadronic shower.
     """
-    path = os.path.join(hnl_dir, f"muon_image_spread_{file_tag}{mass:.0f}.npz")
+    path = os.path.join(hnl_dir, f"hnl_signal_mN_{mass:.0f}.npz")
     d = np.load(path, allow_pickle=True)
 
     # cast the tag arrays to bool: a multi-U2 file with any 0-event grid point
@@ -157,7 +162,7 @@ def load_hnl(mass, hnl_dir=HNL_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
     if tag == "kinematic":
         both = np.ones(len(d["opening_deg"]), dtype=bool)   # no detection cut
     else:
-        both = (d["n_ph1"] >= min_photons) & (d["n_ph2"] >= min_photons)
+        both = (d["mu1_n_ph"] >= min_photons) & (d["mu2_n_ph"] >= min_photons)
         tag_arr = d["same_detector"] if tag == "same_detector" else d["both_detected"]
         both = both & np.asarray(tag_arr, dtype=bool)
 
@@ -195,7 +200,10 @@ def load_hnl(mass, hnl_dir=HNL_DIR_DEFAULT, min_photons=MIN_PHOTONS_DEFAULT,
     out = dict(
         opening_deg=d["opening_deg"][sel],
         oncam_sep_deg=np.asarray(d["oncam_sep_deg"])[sel],
-        E_mu1=d["E_mu1"][sel], E_mu2=d["E_mu2"][sel],
+        mu1_E=d["mu1_E"][sel], mu2_E=d["mu2_E"][sel],
+        mu1_n_ph=d["mu1_n_ph"][sel], mu2_n_ph=d["mu2_n_ph"][sel],
+        mu1_dir=np.asarray(d["mu1_dir"])[sel], mu2_dir=np.asarray(d["mu2_dir"])[sel],
+        mu1_pix=np.asarray(d["mu1_pix"])[sel], mu2_pix=np.asarray(d["mu2_pix"])[sel],
         hnl_energy=d["hnl_energy"][sel],
         U2=ev_U2[sel], weight=w_all[sel], m_N=float(mass), U2_sel=U2_sel,
     )

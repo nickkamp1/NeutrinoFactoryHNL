@@ -1,38 +1,39 @@
-"""HNL sensitivity in (m_N, U2) from a 2D binned likelihood over the charm
-discriminators: the on-camera mu-mu separation and the detected hadronic-shower
-photon count.
+"""HNL sensitivity in (m_N, U2) from a 2D binned likelihood over two camera
+discriminators:
+
+  * ``oncam_sep_deg`` -- the on-camera mu-mu separation (HNL pairs are more
+    collimated than charm dimuons), and
+  * ``pix_sep``       -- the beam-axis distance of the dimuon system,
+        pix_sep = |mu1_pix + mu2_pix| * PIX_DEG   [deg],
+    which exploits that the muon-decay-neutrino charm background is collimated
+    on the beam axis (its dimuons cluster near pixel (0,0)), whereas the HNL
+    signal is produced off-axis by muon scattering.
 
 Method
 ------
 The HNL signal kinematics/imaging are U2-INDEPENDENT (they depend on m_N and the
 decay POSITION, not the mixing), so a single reference sample per mass -- run
-with uniform decay-distance sampling (``uniform_gen=True``) -- is reweighted to
-any (m_N, U2) with ``HNLFluxGeometry.compute_reweighted_signal_at_satellite``.
-Only the event weights change; the per-event (on-camera separation) carries over.
+with mixture decay-distance sampling -- is reweighted to any (m_N, U2) using the
+stored proposal density ``sampling_pdf``.  Only the per-event weights change; the
+per-event (oncam_sep_deg, pix_sep) carry over.
 
 For each (m_N, U2):
   * reweight the reference HNL events -> per-event expected-signal weight;
-  * bin the tagged signal in the 2D plane (on-camera separation x hadronic
-    photons).  The HNL decay is LEPTONIC, so all signal sits in the
-    "no hadronic shower" column (had_photons = 0);
-  * the charm background (U2-INDEPENDENT) is binned once in the same plane;
+  * bin the tagged signal in the 2D (oncam_sep_deg x pix_sep) plane;
+  * the charm background (U2-INDEPENDENT), summed over the scattering and decay
+    neutrino sources, is binned once in the same plane;
   * the median expected significance is the binned Asimov value
 
         Z = sqrt( 2 * sum_bins [ (s+b) ln(1 + s/b) - s ] )   (b > 0)
 
     and the sensitivity contour is where Z crosses a chosen level (e.g. 2).
 
-The 2D likelihood buys two things over a plain count: the hadronic axis removes
-the ~half of charm with a detectable shower, and the separation axis then
-distinguishes the collimated (often <1-pixel, "single blob") HNL pair from the
-wider-separation charm survivors.
-
 Runs locally: HNLFluxGeometry (the reweighter) is pure numpy -- no SIREN needed.
 
 Typical use
 -----------
     from src.hnl_sensitivity import SensitivityModel
-    m = SensitivityModel(detector=8, masses=[5,10,20,30,50])
+    m = SensitivityModel(detector=8, R_det=2, masses=[5,10,20,30,50])
     grid = m.significance_grid()            # Z(m_N, U2)
     m.plot_contours(output="figures/sensitivity_det8.png")
 """
@@ -43,13 +44,18 @@ import numpy as np
 
 from src.constants import N_muon_decays
 
-from scipy.stats import poisson,norm
+from scipy.stats import poisson, norm
 
 # thresholds (12 PE / 0.4), matching charm_vs_hnl
 SIPM_PDE = 0.40
 MIN_PHOTOELECTRONS = 12.0
 MIN_PHOTONS_DEFAULT = MIN_PHOTOELECTRONS / SIPM_PDE   # 30 photons
-PIXEL_DEG = 0.15
+# camera pixel size used by the sims (mu*_pix are stored in these pixel units);
+# pix_sep converts them to degrees.
+PIX_DEG = 0.3
+
+# charm neutrino sources summed into the background
+DEFAULT_CHARM_MODES = ("scattering", "decay")
 
 # nominal beam-dump config (matches the sims)
 E_MU, DUMP_DEPTH, DUMP_ANGLE = 5000.0, 100.0, 1.53
@@ -61,93 +67,95 @@ def _geom():
     return HNLFluxGeometry(E_mu=E_MU, dump_depth=DUMP_DEPTH, dump_angle=DUMP_ANGLE)
 
 
+def pix_sep_deg(d):
+    """Beam-axis distance of the dimuon system on the camera [deg]:
+    |mu1_pix + mu2_pix| * PIX_DEG.  ``d`` is an npz mapping (or dict) with the
+    unified per-event pixel arrays mu1_pix, mu2_pix of shape (N, 2)."""
+    v = np.asarray(d["mu1_pix"], float) + np.asarray(d["mu2_pix"], float)
+    return np.sqrt(np.sum(v ** 2, axis=1)) * PIX_DEG
+
+
 # --------------------------------------------------------------------------- #
 # Binning of the 2D discriminator plane
 # --------------------------------------------------------------------------- #
-def default_bins(min_photons=MIN_PHOTONS_DEFAULT):
-    """(sep_edges [deg], had_edges [photons]).
+def default_bins():
+    """(sep_edges [deg], pixsep_edges [deg]).
 
-    Separation: an 'unresolved' bin below one pixel (spots merge), then log bins.
-    Hadronic photons: 'no detectable shower' [0, threshold), then above-threshold
-    bins (which carry no signal but bound the charm shower).
-    """
-    sep_edges = np.concatenate([#[0.0, PIXEL_DEG],
-                                np.logspace(np.log10(PIXEL_DEG), np.log10(6.0), 7)[1:]])
-    had_edges = np.array([0.0, min_photons])#, 3 * min_photons, 10 * min_photons, np.inf])
-    return sep_edges, had_edges
+    Both start at 0 (a near-axis / merged-spot bin) and end at +inf to catch the
+    tail.  On-camera separation distinguishes collimated HNL pairs from wider
+    charm; beam-axis distance distinguishes on-axis (decay) charm from off-axis
+    HNL."""
+    sep_edges = np.arange(PIX_DEG,6.0,PIX_DEG)
+    pixsep_edges = np.arange(0,6.0,PIX_DEG)
+    return sep_edges, pixsep_edges
 
 
 # --------------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------------- #
-def load_charm_2d(detector, R4=False, min_photons=MIN_PHOTONS_DEFAULT, data_dir="data"):
-    """Charm background per-event (sep, had_photons, weight) for tagged events on
-    one detector.  Returns arrays; weights are absolute expected events."""
-    cdir = os.path.join(data_dir, f"scan_results_balloon_charm_det{detector}_{'R4' if R4 else ''}")
-    files = sorted(glob.glob(os.path.join(cdir, "charm_bkg_seed_*.npz")))
-    if not files:
-        raise FileNotFoundError(f"no charm files in {cdir}")
-    n_seeds = len(files)
-    sep, had, w = [], [], []
-    for f in files:
-        d = np.load(f)
-        mpc = d["mu_photon_counts"]          # (2, 1, N)
-        hpc = d["hadronic_photon_counts"]    # (1, N)
-        N_samples = int(d["N_samples"])
-        # both muons above threshold on this (single) detector
-        tagged = ((mpc[0, 0] >= min_photons) & (mpc[1, 0] >= min_photons)
-                  & np.asarray(d["same_detector"], bool)
-                  & np.isfinite(d["oncam_sep_deg"]))
-        wev = (d["interaction_weights"] * float(d["N_nu_per_muon"])
-               * float(d["cherenkov_weight"]) * N_muon_decays
-               / N_samples / n_seeds)
-        sep.append(np.asarray(d["oncam_sep_deg"])[tagged])
-        had.append(np.asarray(hpc[0])[tagged])
-        w.append(wev[tagged])
-    return (np.concatenate(sep), np.concatenate(had), np.concatenate(w))
+def load_charm_2d(detector, R_det=2, modes=DEFAULT_CHARM_MODES,
+                  min_photons=MIN_PHOTONS_DEFAULT, had_veto=True, data_dir="data"):
+    """Charm background per-event (sep, pix_sep, weight) for tagged events on one
+    detector, SUMMED over the requested neutrino sources (modes).  Weights are
+    absolute expected events (per 1e22 muon decays).
+
+    ``had_veto`` (default True): additionally reject charm events with a
+    detectable hadronic shower (had_n_ph >= min_photons).  The HNL signal is
+    leptonic (no shower), so it passes the veto automatically -- this is the
+    single strongest charm-rejection handle, applied here as a pre-cut."""
+    sep, pxs, w = [], [], []
+    for mode in modes:
+        cdir = os.path.join(data_dir,
+                            f"scan_results_balloon_charm_{mode}_det{detector}_R{R_det:g}")
+        files = sorted(glob.glob(os.path.join(cdir, "charm_bkg_seed_*.npz")))
+        if not files:
+            raise FileNotFoundError(f"no charm files in {cdir}")
+        n_seeds = len(files)
+        for f in files:
+            d = np.load(f)
+            m0 = np.asarray(d["mu1_n_ph"], float)
+            m1 = np.asarray(d["mu2_n_ph"], float)
+            N_samples = int(d["N_samples"])
+            # both muons above threshold on the (shared) camera
+            tagged = ((m0 >= min_photons) & (m1 >= min_photons)
+                      & np.asarray(d["same_detector"], bool)
+                      & np.isfinite(d["oncam_sep_deg"]))
+            if had_veto:                       # reject charm with a detectable shower
+                tagged &= np.asarray(d["had_n_ph"], float) < min_photons
+            wev = (np.asarray(d["interaction_weights"], float) * float(d["N_nu_per_muon"])
+                   * float(d["cherenkov_weight"]) * N_muon_decays
+                   / N_samples / n_seeds)
+            sep.append(np.asarray(d["oncam_sep_deg"], float)[tagged])
+            pxs.append(pix_sep_deg(d)[tagged])
+            w.append(wev[tagged])
+    return np.concatenate(sep), np.concatenate(pxs), np.concatenate(w)
 
 
-def load_hnl_ref(mass, detector, R4=False, data_dir="data"):
-    """HNL reference events (uniform_gen) for one mass/detector: the reweight
-    inputs + on-camera separation for tagged (both-muon, same-camera) events."""
-    path = os.path.join(data_dir, f"scan_results_balloon_hnl/muon_image_spread_det{detector}_{'R4_' if R4 else ''}{mass:.0f}.npz")
-    d = np.load(path, allow_pickle=True)
-    return d
+def load_hnl_ref(mass, detector, R_det=2, data_dir="data"):
+    """HNL reference events for one mass/detector: the reweight inputs + the
+    per-event discriminators (oncam_sep_deg, mu*_pix) for tagged events."""
+    path = os.path.join(data_dir,
+                        f"scan_results_balloon_hnl_det{detector}_R{R_det:g}",
+                        f"hnl_signal_mN_{mass:.0f}.npz")
+    return np.load(path, allow_pickle=True)
 
 
 # --------------------------------------------------------------------------- #
 # Reweighting a reference sample to (m_N, U2)
 # --------------------------------------------------------------------------- #
 def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
-    """Return (sep, weight) for the reference HNL events reweighted to (m_N, U2).
+    """Return (sep, pix_sep, weight) for the reference HNL events reweighted to
+    (m_N, U2).
 
     General importance reweight using the stored proposal density
     ``sampling_pdf`` q(decay_dist): the decay-position weight for the target is
-    decay_pos_probability = p_target(decay_dist) / q(decay_dist), where p_target
-    is the truncated-exponential decay pdf at the target decay length.  This
-    works for ANY proposal (uniform, log-uniform, mixture), unlike
-    compute_reweighted_signal_at_satellite's uniform-only branch.
-
-    Applies the same tag as charm (both muons above threshold on the shared
-    camera).  Signal has no hadronic shower (had_photons = 0 by construction).
-    """
+    decay_pos_probability = p_target(decay_dist) / q(decay_dist).  Applies the
+    same tag as charm (both muons above threshold on the shared camera)."""
     from src.xs_and_decays import HNL_decay_length
     E = np.asarray(ref["hnl_energy"], float)
     d = np.asarray(ref["decay_dist"], float)
     d_max = np.asarray(ref["d_max"], float)
-    # proposal density q(decay_dist).  Newer files store it directly; older
-    # (pre-mixture) uniform/trunc_exp files don't, so reconstruct it from
-    # decay_pos_probability = p_ref/q  =>  q = p_ref/decay_pos_probability.
-    if "sampling_pdf" in ref:
-        q = np.asarray(ref["sampling_pdf"], float)
-    else:
-        Lref = np.asarray(ref["decay_length"], float)
-        dpp_ref = np.asarray(ref["decay_pos_probability"], float)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            p_ref = np.where((Lref > 0) & (d_max > 0),
-                             np.exp(-d / Lref) / (Lref * (1.0 - np.exp(-d_max / Lref))),
-                             0.0)
-            q = np.where(dpp_ref > 0, p_ref / dpp_ref, 1.0)
+    q = np.asarray(ref["sampling_pdf"], float)
     with np.errstate(divide="ignore", invalid="ignore"):
         L = HNL_decay_length(m_N, U2, E)                      # target decay length
         decay_prob = np.where(d_max > 0, 1.0 - np.exp(-d_max / L), 0.0)
@@ -157,40 +165,45 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
     ip = float(geom.compute_weighted_production_rate(m_N, U2)[0])
     br = float(np.ravel(ref["meta_BR_mumu"])[0])
     cw = float(np.ravel(ref["meta_cherenkov_weight"])[0])
-    # Normalize by N_samples (beam MC events THROWN), NOT meta_n_events (the
-    # imaged/valid subset): the cherenkov_weight cw already rescales the imaged
-    # sample up to the full valid sample, and the Monte-Carlo estimator of the
-    # expected event rate divides by the total number thrown.  Dividing by
-    # meta_n_events instead over-counts by N_samples/n_events (~25x), which
-    # matches Balloon.ipynb's sig_events_extrapolated to ~10% once corrected.
-    # Older files predate meta_N_samples; they were all generated with the
-    # run_muon_image_spread.py driver at N_samples=1e6, so fall back to that.
-    if "meta_N_samples" in ref:
-        ns = float(np.ravel(ref["meta_N_samples"])[0])
-    else:
-        ns = 1.0e6
+    # Normalize by N_samples (beam MC events THROWN), NOT meta_n_events: cw
+    # already rescales the imaged sample up to the full valid sample, and the MC
+    # estimator of the expected rate divides by the total number thrown.
+    ns = float(np.ravel(ref["meta_N_samples"])[0])
     w = (decay_prob * dpp * ip * br * N_muon_decays * cw / ns
          if ns > 0 else np.zeros_like(d))
-    both = ((np.asarray(ref["n_ph1"]) >= min_photons)
-            & (np.asarray(ref["n_ph2"]) >= min_photons)
+    both = ((np.asarray(ref["mu1_n_ph"], float) >= min_photons)
+            & (np.asarray(ref["mu2_n_ph"], float) >= min_photons)
             & np.asarray(ref["same_detector"], bool)
             & np.isfinite(ref["oncam_sep_deg"]))
-    return np.asarray(ref["oncam_sep_deg"])[both], np.asarray(w)[both]
+    return (np.asarray(ref["oncam_sep_deg"], float)[both],
+            pix_sep_deg(ref)[both], np.asarray(w)[both])
 
 
 # --------------------------------------------------------------------------- #
 # Significance
 # --------------------------------------------------------------------------- #
-def save_all_contours(path, detectors=(2, 5, 8), masses=(5, 6, 7, 8, 9, 10, 12,
-                      14, 16, 20, 25, 30), levels=(2.0, 5.0),
-                      min_photons=MIN_PHOTONS_DEFAULT, data_dir="data", key="Z2d"):
+def asimov_Z(s, b):
+    """Binned Asimov median significance, sum over bins with b > 0.
+    Z = sqrt( 2 sum [ (s+b) ln(1 + s/b) - s ] ).  s, b may be any shape."""
+    s = np.asarray(s, float); b = np.asarray(b, float)
+    m = b > 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        term = (s[m] + b[m]) * np.log1p(s[m] / b[m]) - s[m]
+    return float(np.sqrt(2.0 * np.maximum(term, 0).sum()))
+
+
+def save_all_contours(path, detectors=(2, 5, 8), R_det=2,
+                      masses=(5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30),
+                      levels=(2.0, 5.0), min_photons=MIN_PHOTONS_DEFAULT,
+                      modes=DEFAULT_CHARM_MODES, had_veto=True, data_dir="data",
+                      key="Z2d"):
     """Save contours for ALL detectors into ONE .npz, Balloon.ipynb-style: keys
-    '<detector>_<photon_threshold>_<level>' (+ '..._count') -> (m_N, U2) points.
-    Returns the merged dict."""
+    '<detector>_<photon_threshold>_<level>' (+ '..._count') -> (m_N, U2) points."""
     merged = {}
     for det in detectors:
-        m = SensitivityModel(detector=det, masses=masses, min_photons=min_photons,
-                             data_dir=data_dir)
+        m = SensitivityModel(detector=det, R_det=R_det, masses=masses,
+                             min_photons=min_photons, modes=modes,
+                             had_veto=had_veto, data_dir=data_dir)
         g = m.significance_grid()
         M, U2, Z = m.significance_map(g, key=key)
         _, _, Zc = m.significance_map(g, key="Zcount")
@@ -204,44 +217,42 @@ def save_all_contours(path, detectors=(2, 5, 8), masses=(5, 6, 7, 8, 9, 10, 12,
     return merged
 
 
-def asimov_Z(s, b):
-    """Binned Asimov median significance, sum over bins with b > 0.
-    Z = sqrt( 2 sum [ (s+b) ln(1 + s/b) - s ] )."""
-    s = np.asarray(s, float); b = np.asarray(b, float)
-    m = b > 0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        term = (s[m] + b[m]) * np.log1p(s[m] / b[m]) - s[m]
-    return float(np.sqrt(2.0 * np.maximum(term, 0).sum()))
-
-
 class SensitivityModel:
-    """1D-likelihood HNL sensitivity for one detector."""
+    """2D-likelihood HNL sensitivity (oncam_sep_deg x pix_sep) for one detector."""
 
-    def __init__(self, detector=8, masses=(5, 10, 20, 30, 50),
-                 min_photons=MIN_PHOTONS_DEFAULT, data_dir="data",
-                 U2_grid=None, R4=False):
+    def __init__(self, detector=8, R_det=2, masses=(5, 10, 20, 30, 50),
+                 min_photons=MIN_PHOTONS_DEFAULT, modes=DEFAULT_CHARM_MODES,
+                 had_veto=True, data_dir="data", U2_grid=None):
         self.detector = detector
+        self.R_det = R_det
         self.masses = list(masses)
         self.min_photons = min_photons
+        self.modes = tuple(modes)
+        self.had_veto = had_veto
         self.data_dir = data_dir
         self.U2_grid = (np.logspace(-14, -8, 61) if U2_grid is None
                         else np.asarray(U2_grid, float))
-        self.sep_edges, self.had_edges = default_bins(min_photons)
+        self.sep_edges, self.pixsep_edges = default_bins()
         self.geom = _geom()
-        # charm background (fixed), 2D histogram
-        cs, ch, cw = load_charm_2d(detector, R4=R4, min_photons=min_photons, data_dir=data_dir)
-        self.B, _ = np.histogram(cs, self.sep_edges, weights=(cw*(ch<min_photons)))
+        # charm background (U2-independent), 2D histogram, summed over modes
+        cs, cps, cw = load_charm_2d(detector, R_det=R_det, modes=self.modes,
+                                    min_photons=min_photons, had_veto=had_veto,
+                                    data_dir=data_dir)
+        self.B, _, _ = np.histogram2d(cs, cps, [self.sep_edges, self.pixsep_edges],
+                                      weights=cw)
         self.B_total = float(cw.sum())
-        self.refs = {m: load_hnl_ref(m, detector, R4=R4, data_dir=data_dir) for m in self.masses}
+        self.refs = {m: load_hnl_ref(m, detector, R_det=R_det, data_dir=data_dir)
+                     for m in self.masses}
 
     def signal_hist(self, m_N, U2):
-        """1D signal histogram."""
-        sep, w = reweight_hnl(self.geom, self.refs[m_N], m_N, U2, self.min_photons)
-        S, _ = np.histogram(sep, self.sep_edges, weights=w)
+        """2D signal histogram (oncam_sep_deg x pix_sep)."""
+        sep, ps, w = reweight_hnl(self.geom, self.refs[m_N], m_N, U2, self.min_photons)
+        S, _, _ = np.histogram2d(sep, ps, [self.sep_edges, self.pixsep_edges],
+                                 weights=w)
         return S, float(S.sum())
 
     def significance_grid(self):
-        """Z(m_N, U2) for the 1D likelihood and for a plain count (no
+        """Z(m_N, U2) for the 2D likelihood and for a plain count (no
         discriminator).  Returns dict of (n_mass, n_U2) arrays."""
         Z2d = np.zeros((len(self.masses), len(self.U2_grid)))
         Zcount = np.zeros_like(Z2d)
@@ -251,7 +262,6 @@ class SensitivityModel:
             for j, U2 in enumerate(self.U2_grid):
                 S, s_tot = self.signal_hist(m, U2)
                 Z2d[i, j] = asimov_Z(S, self.B)
-                # counting: total tagged S vs total tagged B (single bin)
                 Zcount[i, j] = asimov_Z([s_tot], [self.B_total])
                 Stot[i, j] = s_tot
                 if s_tot < 30:
@@ -262,9 +272,8 @@ class SensitivityModel:
                     Z2d=Z2d, Zcount=Zcount, S_total=Stot, BackgroundFree=BackgroundFree)
 
     def contour(self, grid=None, Z_level=2.0, key="Z2d"):
-        """U2 exclusion/discovery reach vs mass: the LOWEST U2 where Z crosses
-        Z_level (the lower edge of the sensitive band), log-linearly interpolated
-        between grid points for a smooth curve.  Returns (masses, U2_limit)."""
+        """U2 reach vs mass: the LOWEST U2 where Z crosses Z_level (lower edge of
+        the sensitive band), log-linearly interpolated.  Returns (masses, U2_limit)."""
         grid = grid if grid is not None else self.significance_grid()
         U2 = grid["U2"]
         logU = np.log10(U2)
@@ -278,17 +287,14 @@ class SensitivityModel:
             if j == 0:
                 out[i] = U2[0]
             else:
-                # interpolate the Z_level crossing in (Z, log U2) between j-1, j
                 z0, z1 = Z[j - 1], Z[j]
                 t = (Z_level - z0) / (z1 - z0) if z1 != z0 else 0.0
                 out[i] = 10.0 ** (logU[j - 1] + t * (logU[j] - logU[j - 1]))
         return np.array(self.masses, float), out
 
     def significance_map(self, grid=None, key="Z2d", n_mass=120, n_u2=120):
-        """Interpolate the significance onto a fine (m_N, U2) grid for the
-        heatmap/contours.  Mass is only simulated at discrete points (the
-        reference samples), so we interpolate log10(Z) over (log m_N, log U2);
-        U2 is already continuous via reweighting.  Returns (M, U2, Z) meshes."""
+        """Interpolate log10(Z) onto a fine (m_N, U2) grid (mass is only simulated
+        at discrete points; U2 is continuous via reweighting).  Returns (M,U2,Z)."""
         from scipy.interpolate import RegularGridInterpolator
         grid = grid if grid is not None else self.significance_grid()
         logm = np.log10(grid["masses"]); logu = np.log10(grid["U2"])
@@ -303,8 +309,8 @@ class SensitivityModel:
         return M, U2, Z
 
     def _contour_segments(self, M, U2, Z, level):
-        """(m_N, U2) contour points at `level`, Balloon.ipynb format: multiple
-        segments joined by [nan, nan] rows (empty -> (0,2) array)."""
+        """(m_N, U2) contour points at `level`, Balloon.ipynb format: segments
+        joined by [nan, nan] rows (empty -> (0,2) array)."""
         import matplotlib.pyplot as plt
         fig = plt.figure()
         cs = plt.contour(M, U2, Z, levels=[level])
@@ -317,9 +323,8 @@ class SensitivityModel:
 
     def save_contours(self, path, levels=(2.0, 5.0), key="Z2d", grid=None):
         """Save (m_N, U2) contour curves to an .npz in the Balloon.ipynb format:
-        keys '<detector>_<photon_threshold>_<level>' -> (N,2) arrays of contour
-        points (nan-separated segments).  Also stored per count-only key with a
-        '_count' suffix for comparison."""
+        keys '<detector>_<photon_threshold>_<level>' -> (N,2) nan-separated segments.
+        Count-only curves stored with a '_count' suffix."""
         grid = grid if grid is not None else self.significance_grid()
         M, U2, Z = self.significance_map(grid, key=key)
         _, _, Zc = self.significance_map(grid, key="Zcount")
@@ -336,7 +341,7 @@ class SensitivityModel:
     def plot_heatmap(self, key="Z2d", levels=(2.0, 5.0), shade_level=2.0,
                      output=None, ax=None, grid=None):
         """2D significance heatmap over (m_N, U2) with contour lines and the
-        Z>=shade_level (sensitive / excludable) region hatched."""
+        Z>=shade_level region hatched."""
         import matplotlib.pyplot as plt
         from matplotlib.colors import LogNorm
         style = os.path.join(os.getcwd(), "figures.mplstyle")
@@ -359,12 +364,11 @@ class SensitivityModel:
         cs = ax.contour(M, U2, Z, levels=list(levels), colors="white",
                         linestyles=["--", "-"][:len(levels)], linewidths=1.5)
         ax.clabel(cs, fmt=lambda v: f"{v:.0f}$\\sigma$", fontsize=8)
-        # hatch the Z >= shade_level region (the reach)
         ax.contourf(M, U2, (Z >= shade_level).astype(float), levels=[0.5, 1.5],
                     colors="none", hatches=["///"], alpha=0)
         ax.set_xscale("log"); ax.set_yscale("log")
         ax.set_xlabel(r"$m_N$ [GeV]"); ax.set_ylabel(r"$|U_\mu|^2$")
-        ax.set_title(f"HNL sensitivity, detector {self.detector} "
+        ax.set_title(f"HNL sensitivity, detector {self.detector} R={self.R_det} m "
                      f"({self.min_photons*SIPM_PDE:.0f} PE); hatched: $Z\\geq{shade_level:.0f}$",
                      fontsize=9)
         fig.tight_layout()
@@ -389,13 +393,13 @@ class SensitivityModel:
             fig = ax.figure
         m2d, u2d = self.contour(grid, Z_level, "Z2d")
         mc, uc = self.contour(grid, Z_level, "Zcount")
-        ax.plot(m2d, u2d, "-o", ms=3, label="2D likelihood (sep + hadronic)")
+        ax.plot(m2d, u2d, "-o", ms=3, label="2D likelihood (sep + beam-axis)")
         ax.plot(mc, uc, "--s", ms=3, color="gray",
                 label="count only (no discriminator)")
         ax.set_yscale("log")
         ax.set_xlabel(r"$m_N$ [GeV]")
         ax.set_ylabel(r"$U^2$ reach (Z=%.0f)" % Z_level)
-        ax.set_title(f"HNL sensitivity, detector {self.detector} "
+        ax.set_title(f"HNL sensitivity, detector {self.detector} R={self.R_det} m "
                      f"({self.min_photons*SIPM_PDE:.0f} PE)", fontsize=10)
         ax.legend(fontsize=8)
         fig.tight_layout()

@@ -119,6 +119,14 @@ def muon_image_at_detector(decay_pos, mu_dir, mu_energy, det_pos,
 
     track_length = muon_range_in_air(mu_energy, decay_altitude,
                                      direction_cosine=p_hat[2])
+    # Only the track BELOW the down-facing detector can send Cherenkov light to
+    # it, so cap the track at the distance to the detector plane.  Otherwise the
+    # N_track points are spread over the full ~100 km muon range and the narrow
+    # collecting region near a CLOSE detector is badly under-sampled -> noisy,
+    # biased n_ph (e.g. the 1 km station).  Far detectors are unaffected (their
+    # collecting region already spans ~the whole track).
+    t_to_detector = (det_pos[2] - decay_pos[2]) / p_hat[2]
+    track_length = min(track_length, t_to_detector)
     if N_track is None:
         N_track = min(1000, max(300, int(track_length / 100)))
 
@@ -295,7 +303,14 @@ def sample_dimuon_kinematics(geom, m_N, U2, detector_positions, N_samples=2000,
     decay_length = HNL_decay_length(m_N, U2, hnl_energy)
     cos_z = hnl_dirs[:, 2]
     upward = cos_z > 0
-    d_max = np.where(upward, d_max_curved_earth(cos_z, max_det_height), 0.0)
+    # d_max is the max decay distance from the PRODUCTION point to the detector.
+    # Production is up to L_target below the exit (prod_points[:,2] < 0), so the
+    # reachable height above the production point is (max_det_height - prod_z);
+    # using max_det_height alone (exit-referenced) under-samples deep-produced
+    # HNLs -- fatal for close detectors (e.g. heavy HNL at the 1 km station).
+    d_max = np.where(upward,
+                     d_max_curved_earth(cos_z, max_det_height - prod_points[:, 2]),
+                     0.0)
     d_max = np.maximum(d_max, 0.0)
     mode = sampling if sampling is not None else ("uniform" if uniform_gen else "trunc_exp")
     dmin = np.maximum(d_max * dmin_frac, 1.0)          # log-uniform lower edge

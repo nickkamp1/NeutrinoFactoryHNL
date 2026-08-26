@@ -1,13 +1,16 @@
-"""HNL sensitivity in (m_N, U2) from a 2D binned likelihood over two camera
-discriminators:
+"""HNL sensitivity in (m_N, U2) from a 1D binned likelihood in one camera
+discriminator, with an opening-angle pre-cut:
 
-  * ``oncam_sep_deg`` -- the on-camera mu-mu separation (HNL pairs are more
-    collimated than charm dimuons), and
-  * ``pix_sep``       -- the beam-axis distance of the dimuon system,
+  * PRE-CUT  ``oncam_sep_deg`` -- the on-camera mu-mu separation.  HNL pairs are
+    collimated; charm dimuons are wider.  Events are kept only if
+        oncam_sep_deg < SEP_CUT_PIX * PIX_DEG   (5 pixels = 1.5 deg).
+  * LIKELIHOOD ``pix_sep`` -- the beam-axis distance of the dimuon system,
         pix_sep = |mu1_pix + mu2_pix| * PIX_DEG   [deg],
     which exploits that the muon-decay-neutrino charm background is collimated
     on the beam axis (its dimuons cluster near pixel (0,0)), whereas the HNL
-    signal is produced off-axis by muon scattering.
+    signal is produced off-axis by muon scattering.  This variable carries
+    essentially all of the discrimination, so a 1D pix_sep likelihood matches
+    the full 2D one while being far more robust to sparse-background bins.
 
 Method
 ------
@@ -19,14 +22,17 @@ per-event (oncam_sep_deg, pix_sep) carry over.
 
 For each (m_N, U2):
   * reweight the reference HNL events -> per-event expected-signal weight;
-  * bin the tagged signal in the 2D (oncam_sep_deg x pix_sep) plane;
+  * apply the opening-angle cut and bin the tagged signal in 1D pix_sep;
   * the charm background (U2-INDEPENDENT), summed over the scattering and decay
-    neutrino sources, is binned once in the same plane;
-  * the median expected significance is the binned Asimov value
+    neutrino sources, is binned once the same way;
+  * the median expected significance is the paper's background-limited value
 
-        Z = sqrt( 2 * sum_bins [ (s+b) ln(1 + s/b) - s ] )   (b > 0)
+        Z = sqrt( sum_bins s^2 / (s + b) )                    [s/sqrt(s+b)]
 
     and the sensitivity contour is where Z crosses a chosen level (e.g. 2).
+    Because s^2/(s+b) <= s per bin, Z can never exceed its background-free
+    limit sqrt(sum s) = sqrt(s_tot); empty-background bins contribute s (they
+    are NOT dropped).
 
 Runs locally: HNLFluxGeometry (the reweighter) is pure numpy -- no SIREN needed.
 
@@ -44,8 +50,6 @@ import numpy as np
 
 from src.constants import N_muon_decays
 
-from scipy.stats import poisson, norm
-
 # thresholds (12 PE / 0.4), matching charm_vs_hnl
 SIPM_PDE = 0.40
 MIN_PHOTOELECTRONS = 12.0
@@ -53,6 +57,10 @@ MIN_PHOTONS_DEFAULT = MIN_PHOTOELECTRONS / SIPM_PDE   # 30 photons
 # camera pixel size used by the sims (mu*_pix are stored in these pixel units);
 # pix_sep converts them to degrees.
 PIX_DEG = 0.3
+# opening-angle pre-cut on the on-camera mu-mu separation, in pixels: keep the
+# collimated HNL pairs, reject wider charm dimuons.  Applied (as oncam_sep_deg <
+# SEP_CUT_PIX * PIX_DEG) identically to signal and charm before binning.
+SEP_CUT_PIX = 5.0
 
 # charm neutrino sources summed into the background
 DEFAULT_CHARM_MODES = ("scattering", "decay")
@@ -86,7 +94,7 @@ def default_bins():
     charm; beam-axis distance distinguishes on-axis (decay) charm from off-axis
     HNL."""
     sep_edges = np.arange(PIX_DEG,6.0,PIX_DEG)
-    pixsep_edges = np.arange(0,6.0,PIX_DEG)
+    pixsep_edges = list(np.arange(0,6.0,PIX_DEG)) + [np.inf]
     return sep_edges, pixsep_edges
 
 
@@ -116,10 +124,11 @@ def load_charm_2d(detector, R_det=2, modes=DEFAULT_CHARM_MODES,
             m0 = np.asarray(d["mu1_n_ph"], float)
             m1 = np.asarray(d["mu2_n_ph"], float)
             N_samples = int(d["N_samples"])
-            # both muons above threshold on the (shared) camera
+            # both muons above threshold on the (shared) camera, opening-angle cut
             tagged = ((m0 >= min_photons) & (m1 >= min_photons)
                       & np.asarray(d["same_detector"], bool)
-                      & np.isfinite(d["oncam_sep_deg"]))
+                      & np.isfinite(d["oncam_sep_deg"])
+                      & (np.asarray(d["oncam_sep_deg"], float) < SEP_CUT_PIX * PIX_DEG))
             if had_veto:                       # reject charm with a detectable shower
                 tagged &= np.asarray(d["had_n_ph"], float) < min_photons
             wev = (np.asarray(d["interaction_weights"], float) * float(d["N_nu_per_muon"])
@@ -174,7 +183,8 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
     both = ((np.asarray(ref["mu1_n_ph"], float) >= min_photons)
             & (np.asarray(ref["mu2_n_ph"], float) >= min_photons)
             & np.asarray(ref["same_detector"], bool)
-            & np.isfinite(ref["oncam_sep_deg"]))
+            & np.isfinite(ref["oncam_sep_deg"])
+            & (np.asarray(ref["oncam_sep_deg"], float) < SEP_CUT_PIX * PIX_DEG))
     return (np.asarray(ref["oncam_sep_deg"], float)[both],
             pix_beamline_angle(ref)[both], np.asarray(w)[both])
 
@@ -182,9 +192,30 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
 # --------------------------------------------------------------------------- #
 # Significance
 # --------------------------------------------------------------------------- #
+def z_ssb(s, b):
+    """Binned s/sqrt(s+b) significance: Z = sqrt( sum_bins s^2 / (s + b) ).
+
+    The paper's background-limited sensitivity convention.  Per bin the term
+    s^2/(s+b) is bounded above by s (attained as b -> 0), so:
+      * the background-free limit is Z_bkgfree = sqrt(sum s) = sqrt(s_tot);
+      * since s+b >= s, the with-background Z can NEVER exceed sqrt(s_tot)
+        (no capping needed);
+      * empty-background bins (b == 0, s > 0) contribute s and are NOT dropped.
+    s, b may be any shape."""
+    s = np.asarray(s, float); b = np.asarray(b, float)
+    denom = s + b
+    m = denom > 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z2 = np.where(m, s * s / np.where(m, denom, 1.0), 0.0)
+    return float(np.sqrt(z2.sum()))
+
+
 def asimov_Z(s, b):
-    """Binned Asimov median significance, sum over bins with b > 0.
-    Z = sqrt( 2 sum [ (s+b) ln(1 + s/b) - s ] ).  s, b may be any shape."""
+    """Binned Asimov median DISCOVERY significance, sum over bins with b > 0.
+    Z = sqrt( 2 sum [ (s+b) ln(1 + s/b) - s ] ).  s, b may be any shape.
+    NOTE: kept for reference/back-compat; the sensitivity now uses ``z_ssb``.
+    In near-background-free bins this Asimov form can exceed sqrt(s_tot), which
+    is why the background-limited s/sqrt(s+b) is used instead."""
     s = np.asarray(s, float); b = np.asarray(b, float)
     m = b > 0
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -218,7 +249,8 @@ def save_all_contours(path, detectors=(2, 5, 8), R_det=2,
 
 
 class SensitivityModel:
-    """2D-likelihood HNL sensitivity (oncam_sep_deg x pix_sep) for one detector."""
+    """1D pix_sep-likelihood HNL sensitivity (with an oncam_sep_deg opening-angle
+    pre-cut) for one detector, using the s/sqrt(s+b) background-limited TS."""
 
     def __init__(self, detector=8, R_det=2, masses=(5, 10, 20, 30, 50),
                  min_photons=MIN_PHOTONS_DEFAULT, modes=DEFAULT_CHARM_MODES,
@@ -234,26 +266,28 @@ class SensitivityModel:
                         else np.asarray(U2_grid, float))
         self.sep_edges, self.pixsep_edges = default_bins()
         self.geom = _geom()
-        # charm background (U2-independent), 2D histogram, summed over modes
+        # charm background (U2-independent), 1D pix_sep histogram, summed over
+        # modes.  The opening-angle cut is applied inside load_charm_2d.
         cs, cps, cw = load_charm_2d(detector, R_det=R_det, modes=self.modes,
                                     min_photons=min_photons, had_veto=had_veto,
                                     data_dir=data_dir)
-        self.B, _, _ = np.histogram2d(cs, cps, [self.sep_edges, self.pixsep_edges],
-                                      weights=cw)
+        self.B, _ = np.histogram(cps, self.pixsep_edges, weights=cw)
         self.B_total = float(cw.sum())
         self.refs = {m: load_hnl_ref(m, detector, R_det=R_det, data_dir=data_dir)
                      for m in self.masses}
 
     def signal_hist(self, m_N, U2):
-        """2D signal histogram (oncam_sep_deg x pix_sep)."""
+        """1D pix_sep signal histogram (after the opening-angle pre-cut)."""
         sep, ps, w = reweight_hnl(self.geom, self.refs[m_N], m_N, U2, self.min_photons)
-        S, _, _ = np.histogram2d(sep, ps, [self.sep_edges, self.pixsep_edges],
-                                 weights=w)
+        S, _ = np.histogram(ps, self.pixsep_edges, weights=w)
         return S, float(S.sum())
 
     def significance_grid(self):
-        """Z(m_N, U2) for the 2D likelihood and for a plain count (no
-        discriminator).  Returns dict of (n_mass, n_U2) arrays."""
+        """Z(m_N, U2) for the 1D pix_sep likelihood (s/sqrt(s+b)) and for a plain
+        count (no discriminator), plus the background-free ceiling sqrt(s_tot).
+        The grid key ``Z2d`` holds the primary (1D pix_sep) significance -- the
+        name is kept for downstream/Balloon.ipynb compatibility.  Returns dict of
+        (n_mass, n_U2) arrays."""
         Z2d = np.zeros((len(self.masses), len(self.U2_grid)))
         Zcount = np.zeros_like(Z2d)
         Stot = np.zeros_like(Z2d)
@@ -261,13 +295,10 @@ class SensitivityModel:
         for i, m in enumerate(self.masses):
             for j, U2 in enumerate(self.U2_grid):
                 S, s_tot = self.signal_hist(m, U2)
-                Z2d[i, j] = asimov_Z(S, self.B)
-                Zcount[i, j] = asimov_Z([s_tot], [self.B_total])
+                Z2d[i, j] = z_ssb(S, self.B)                    # 1D pix_sep s/sqrt(s+b)
+                Zcount[i, j] = z_ssb([s_tot], [self.B_total])   # count-only s/sqrt(s+b)
                 Stot[i, j] = s_tot
-                if s_tot < 30:
-                    BackgroundFree[i, j] = norm.isf(poisson.cdf(0, s_tot))
-                else:
-                    BackgroundFree[i, j] = np.sqrt(s_tot)
+                BackgroundFree[i, j] = np.sqrt(s_tot)           # b -> 0 limit of z_ssb
         return dict(masses=np.array(self.masses, float), U2=self.U2_grid,
                     Z2d=Z2d, Zcount=Zcount, S_total=Stot, BackgroundFree=BackgroundFree)
 
@@ -360,7 +391,7 @@ class SensitivityModel:
                              norm=LogNorm(vmin=0.5, vmax=max(10, Z.max())),
                              cmap="viridis", shading="auto")
         cb = fig.colorbar(mesh, ax=ax)
-        cb.set_label("median significance $Z$ (2D likelihood)")
+        cb.set_label(r"significance $Z=s/\sqrt{s+b}$ (1D pix_sep)")
         cs = ax.contour(M, U2, Z, levels=list(levels), colors="white",
                         linestyles=["--", "-"][:len(levels)], linewidths=1.5)
         ax.clabel(cs, fmt=lambda v: f"{v:.0f}$\\sigma$", fontsize=8)
@@ -393,7 +424,7 @@ class SensitivityModel:
             fig = ax.figure
         m2d, u2d = self.contour(grid, Z_level, "Z2d")
         mc, uc = self.contour(grid, Z_level, "Zcount")
-        ax.plot(m2d, u2d, "-o", ms=3, label="2D likelihood (sep + beam-axis)")
+        ax.plot(m2d, u2d, "-o", ms=3, label="1D pix_sep likelihood")
         ax.plot(mc, uc, "--s", ms=3, color="gray",
                 label="count only (no discriminator)")
         ax.set_yscale("log")

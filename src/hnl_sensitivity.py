@@ -67,7 +67,7 @@ def _geom():
     return HNLFluxGeometry(E_mu=E_MU, dump_depth=DUMP_DEPTH, dump_angle=DUMP_ANGLE)
 
 
-def pix_sep_deg(d):
+def pix_beamline_angle(d):
     """Beam-axis distance of the dimuon system on the camera [deg]:
     |mu1_pix + mu2_pix| * PIX_DEG.  ``d`` is an npz mapping (or dict) with the
     unified per-event pixel arrays mu1_pix, mu2_pix of shape (N, 2)."""
@@ -126,7 +126,7 @@ def load_charm_2d(detector, R_det=2, modes=DEFAULT_CHARM_MODES,
                    * float(d["cherenkov_weight"]) * N_muon_decays
                    / N_samples / n_seeds)
             sep.append(np.asarray(d["oncam_sep_deg"], float)[tagged])
-            pxs.append(pix_sep_deg(d)[tagged])
+            pxs.append(pix_beamline_angle(d)[tagged])
             w.append(wev[tagged])
     return np.concatenate(sep), np.concatenate(pxs), np.concatenate(w)
 
@@ -176,7 +176,7 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
             & np.asarray(ref["same_detector"], bool)
             & np.isfinite(ref["oncam_sep_deg"]))
     return (np.asarray(ref["oncam_sep_deg"], float)[both],
-            pix_sep_deg(ref)[both], np.asarray(w)[both])
+            pix_beamline_angle(ref)[both], np.asarray(w)[both])
 
 
 # --------------------------------------------------------------------------- #

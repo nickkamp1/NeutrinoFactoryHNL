@@ -9,8 +9,11 @@ interactions in the tunnel is < 1, any HNL decay in the pipe is background-free.
 
 Two observables per (m_N, U2), both pure counting -- no Cherenkov ray tracing:
 
-  * inclusive HNL decay rate in the tunnel  ->  N_incl
-  * dilepton HNL decay rate in the tunnel   ->  N_dilep = N_incl * BR_dilepton
+  * inclusive HNL decay rate in the tunnel  ->  N_incl  (all channels)
+  * dimuon HNL decay rate in the tunnel     ->  N_dimuon = N_incl * BR_mumu,
+    with BR(N4 -> nu_mu mu- mu+) taken from SIREN exactly as the atmospheric
+    analysis does (balloon_siren.SIRENDimuonGeometry.dimuon_branching_ratio), so
+    the two scenarios quote the same branching ratio.
 
 Production is IDENTICAL to the balloon HNL signal (muon SCATTERING in the dump,
 mu N -> N X), reusing HNLFluxGeometry.  The only new geometry is the exact
@@ -30,8 +33,7 @@ import numpy as np
 from src.constants import N_muon_decays
 from src.background import sigma_CC_nu
 from src.muon_beam_dump_helpers import muon_energy_in_earth
-from src.xs_and_decays import (HNL_decay_length, HNL_branching_ratios,
-                               CHANNEL_MU_E_NU, CHANNEL_E_MU_NU, CHANNEL_NU_EE)
+from src.xs_and_decays import HNL_decay_length
 
 # nominal beam-dump config (matches hnl_sensitivity.py: E_MU/DUMP_DEPTH/DUMP_ANGLE)
 E_MU, DUMP_DEPTH, DUMP_ANGLE = 5000.0, 100.0, 1.53
@@ -39,9 +41,9 @@ E_MU, DUMP_DEPTH, DUMP_ANGLE = 5000.0, 100.0, 1.53
 # tunnel geometry: a cylinder on the beam axis, z measured from the surface exit
 # (z=0), extending [TUNNEL_START, TUNNEL_START + TUNNEL_LENGTH] with radius
 # TUNNEL_RADIUS.  Production points sit at z in [-L_target, 0] (upstream).
-TUNNEL_START = 0.0       # m from the surface exit to the tunnel mouth
+TUNNEL_START = -1400.0       # m from the surface exit to the tunnel mouth
 TUNNEL_LENGTH = 100.0    # m
-TUNNEL_RADIUS = 2.0      # m
+TUNNEL_RADIUS = 10.0      # m
 
 # ideal-gas / composition constants for the pressure conversion
 K_B = 1.380649e-23               # J / K
@@ -87,20 +89,75 @@ def tunnel_path_bounds(prod_pts, dirs, z0, z1, radius):
 # --------------------------------------------------------------------------- #
 # HNL decay counting
 # --------------------------------------------------------------------------- #
-def dilepton_BR(m_N, Umu2, Ue2=0.0):
-    """Branching to a charged-dilepton final state -- the detectable tunnel
-    signature -- summing the available charged-dilepton channels:
-        N -> mu- e+ nu   (CC),  N -> e- mu+ nu  (CC),  N -> nu e+ e-  (NC).
-    NOTE: HNL_branching_ratios does NOT include N -> nu mu+ mu-; if you want the
-    mu+mu- channel for m_N > 2 m_mu, add it (_Gamma_N_nu_ll with m_l = m_mu) to
-    HNL_branching_ratios and include it here."""
-    br = HNL_branching_ratios(m_N, Umu2=Umu2, Ue2=Ue2)
-    return br[CHANNEL_MU_E_NU] + br[CHANNEL_E_MU_NU] + br[CHANNEL_NU_EE]
+# --------------------------------------------------------------------------- #
+# Branching ratios from SIREN (mirrors balloon_siren.SIRENDimuonGeometry)
+# --------------------------------------------------------------------------- #
+# The atmospheric analysis gets BR(N4 -> nu_mu mu- mu+) from SIREN's HNLDecay
+# partial widths (balloon_siren.SIRENDimuonGeometry._get_decay /
+# .dimuon_branching_ratio), NOT from xs_and_decays.HNL_branching_ratios (whose
+# channel list is incomplete -- no N -> nu mu+ mu-, no multi-hadron states).  We
+# mirror the SIREN calculation here so the tunnel and the balloon quote the SAME
+# branching ratios.  SIREN is imported lazily so this module still imports (and
+# the inclusive-rate path still runs) in a plain-numpy environment without it.
+_DECAY_CACHE = {}   # (m_N, nature) -> (decay, {signature_key: width}, w_tot)
+
+
+def _siren_decay(m_N, nature="Majorana"):
+    """Build (and cache) SIREN's HNLDecay for m_N with muon-dominated mixing.
+
+    Mixing is [Ue4, Umu4, Utau4] = [0, 1, 0]: branching ratios are independent of
+    the overall mixing scale for a single-flavour coupling, so a unit Umu4 is
+    enough here -- the absolute lifetime is handled by HNL_decay_length(m_N, U2, E).
+    Returns (decay, widths_by_signature, total_width)."""
+    key = (float(m_N), nature)
+    if key in _DECAY_CACHE:
+        return _DECAY_CACHE[key]
+    from siren import interactions, dataclasses          # lazy: needs the lienv env
+    chiral = (interactions.HNLDecay.ChiralNature.Majorana if nature == "Majorana"
+              else interactions.HNLDecay.ChiralNature.Dirac)
+    decay = interactions.HNLDecay(float(m_N), [0.0, 1.0, 0.0], chiral)
+    widths, w_tot = {}, 0.0
+    for s in decay.GetPossibleSignatures():
+        rec = dataclasses.InteractionRecord()
+        rec.signature = s
+        w = decay.TotalDecayWidth(rec)
+        widths[tuple(str(t) for t in s.secondary_types)] = w
+        if w_tot == 0.0:
+            # same for every signature; query once
+            w_tot = decay.TotalDecayWidthAllFinalStates(rec)
+    _DECAY_CACHE[key] = (decay, widths, w_tot)
+    return _DECAY_CACHE[key]
+
+
+def siren_branching_ratios(m_N, nature="Majorana"):
+    """{final-state tuple -> branching ratio} from SIREN partial widths."""
+    _, widths, w_tot = _siren_decay(m_N, nature)
+    if w_tot <= 0:
+        return {k: 0.0 for k in widths}
+    return {k: w / w_tot for k, w in widths.items()}
+
+
+def dimuon_BR(m_N, nature="Majorana"):
+    """BR(N4 -> nu_mu mu- mu+) from SIREN -- the SAME quantity the atmospheric
+    analysis uses (balloon_siren.SIRENDimuonGeometry.dimuon_branching_ratio), so
+    tunnel and balloon dimuon rates are directly comparable.  Zero below 2*m_mu."""
+    from siren import dataclasses
+    PT = dataclasses.Particle.ParticleType
+    decay, _, w_tot = _siren_decay(m_N, nature)
+    for s in decay.GetPossibleSignatures():
+        st = list(s.secondary_types)
+        if (s.primary_type == PT.N4 and len(st) == 3
+                and st[1] == PT.MuMinus and st[2] == PT.MuPlus):
+            rec = dataclasses.InteractionRecord()
+            rec.signature = s
+            return (decay.TotalDecayWidth(rec) / w_tot) if w_tot > 0 else 0.0
+    return 0.0   # channel closed (m_N < 2 m_mu)
 
 
 def tunnel_decay_counts(geom, m_N, U2, N_samples=20000,
-                        z0=TUNNEL_START, z1=None, radius=TUNNEL_RADIUS):
-    """(N_inclusive, N_dilepton): expected HNL decays inside the tunnel for
+                        z0=TUNNEL_START, z1=None, radius=TUNNEL_RADIUS,
+                        nature="Majorana", with_dimuon=True):
+    """(N_inclusive, N_dimuon): expected HNL decays inside the tunnel for
     N_muon_decays muons.  HNL production via muon scattering (mu N -> N X),
     identical to the balloon signal; transverse acceptance folded in exactly via
     tunnel_path_bounds.
@@ -108,7 +165,12 @@ def tunnel_decay_counts(geom, m_N, U2, N_samples=20000,
     Per event the decay-in-tunnel probability is
         P = exp(-t_in / L_dec) - exp(-t_out / L_dec)
     (survival to the pipe mouth times the probability of decaying before exiting
-    it), with L_dec the TOTAL-width decay length.  Assumes U2 is muon mixing."""
+    it), with L_dec the TOTAL-width decay length.  Assumes U2 is muon mixing.
+
+    N_inclusive counts ALL decay channels -- the right observable for a
+    background-free volume.  N_dimuon applies the SIREN BR(N4 -> nu mu- mu+),
+    matching the atmospheric analysis; set with_dimuon=False to skip the SIREN
+    call (and its import) when only the inclusive rate is needed."""
     if z1 is None:
         z1 = z0 + TUNNEL_LENGTH
     prod_pts, N_HNL_per_mu, _, _ = \
@@ -121,17 +183,27 @@ def tunnel_decay_counts(geom, m_N, U2, N_samples=20000,
         P = np.where(valid & (L_dec > 0),
                      np.exp(-t_in / L_dec) - np.exp(-t_out / L_dec), 0.0)
     N_incl = N_muon_decays * N_HNL_per_mu * float(np.mean(P))
-    N_dilep = N_incl * dilepton_BR(m_N, Umu2=U2, Ue2=0.0)
-    return N_incl, N_dilep
+    N_dimu = N_incl * dimuon_BR(m_N, nature=nature) if with_dimuon else np.nan
+    return N_incl, N_dimu
 
 
 def tunnel_significance_grid(geom=None, masses=(5, 7, 10, 14, 20, 30, 40),
-                             U2_grid=None, N_samples=20000, **kw):
+                             U2_grid=None, N_samples=20000, channel="inclusive",
+                             nature="Majorana", **kw):
     """Background-free significance over (m_N, U2).  Since b = 0, the paper's
-    s/sqrt(s+b) reduces to Z = sqrt(N_dilep); the Z=2 contour is N_dilep = 4
-    (use N_dilep = 2.3 for a 90% CL zero-background limit instead).
+    s/sqrt(s+b) reduces to Z = sqrt(N); the Z=2 contour is N = 4 (use N = 2.3 for
+    a 90% CL zero-background limit instead).
 
-    Returns dict(masses, U2, Ninc, Ndilep, Z) with (n_mass, n_U2) arrays.  Feed
+    ``channel``: "inclusive" (default -- all decay channels, the right observable
+    for a background-free volume) or "dimuon" (SIREN BR(N4 -> nu mu- mu+), for a
+    like-for-like comparison with the atmospheric dimuon analysis).
+
+    Efficient: the per-event kinematics and tunnel geometry are U2-INDEPENDENT, so
+    each mass is sampled ONCE and reweighted analytically across the whole U2 grid
+    (N_HNL ~ U2, L_dec ~ 1/U2) -- the same reweighting idea as
+    hnl_sensitivity.reweight_hnl, applied to the tunnel's decay-region acceptance.
+
+    Returns dict(masses, U2, Ninc, Ndimuon, Z) with (n_mass, n_U2) arrays.  Feed
     the 'Z' array straight into hnl_sensitivity.SensitivityModel.significance_map
     / _contour_segments to draw the (closed) exclusion band; the upper edge,
     where HNLs decay BEFORE the tunnel, is captured by the exp(-t_in/L) term."""
@@ -139,14 +211,33 @@ def tunnel_significance_grid(geom=None, masses=(5, 7, 10, 14, 20, 30, 40),
         geom = default_geom()
     if U2_grid is None:
         U2_grid = np.logspace(-14, -8, 61)
+    U2_grid = np.asarray(U2_grid, float)
     masses = list(masses)
+    z0 = kw.pop("z0", TUNNEL_START)
+    z1 = kw.pop("z1", None) or (z0 + TUNNEL_LENGTH)
+    radius = kw.pop("radius", TUNNEL_RADIUS)
+    U2_ref = 1e-10                     # arbitrary: kinematics are U2-independent
+
     Ninc = np.zeros((len(masses), len(U2_grid)))
-    Ndil = np.zeros_like(Ninc)
+    Ndim = np.zeros_like(Ninc)
     for i, m in enumerate(masses):
+        prod, N_HNL_ref, _, _ = \
+            geom.sample_production_points_weighted(m, U2_ref, N_samples)
+        E_mu_local = muon_energy_in_earth(geom.E_mu, prod[:, -1] + geom.L_target)
+        E_N, hnl_dir, _, _ = geom.sample_kinematics(prod[:, -1], E_mu_local, m_N=m)
+        t_in, t_out, valid = tunnel_path_bounds(prod, hnl_dir, z0, z1, radius)
+        br = dimuon_BR(m, nature=nature) if channel == "dimuon" else 1.0
         for j, U2 in enumerate(U2_grid):
-            Ninc[i, j], Ndil[i, j] = tunnel_decay_counts(geom, m, U2, N_samples, **kw)
-    return dict(masses=np.array(masses, float), U2=np.asarray(U2_grid, float),
-                Ninc=Ninc, Ndilep=Ndil, Z=np.sqrt(Ndil))
+            L_dec = HNL_decay_length(m, U2, E_N)
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                P = np.where(valid & (L_dec > 0),
+                             np.exp(-t_in / L_dec) - np.exp(-t_out / L_dec), 0.0)
+            Ninc[i, j] = (N_muon_decays * (N_HNL_ref * U2 / U2_ref)
+                          * float(np.mean(P)))
+            Ndim[i, j] = Ninc[i, j] * br
+    N_sig = Ndim if channel == "dimuon" else Ninc
+    return dict(masses=np.array(masses, float), U2=U2_grid,
+                Ninc=Ninc, Ndimuon=Ndim, Z=np.sqrt(N_sig))
 
 
 # --------------------------------------------------------------------------- #

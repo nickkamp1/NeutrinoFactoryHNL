@@ -94,7 +94,7 @@ def default_bins():
     charm; beam-axis distance distinguishes on-axis (decay) charm from off-axis
     HNL."""
     sep_edges = np.arange(PIX_DEG,6.0,PIX_DEG)
-    pixsep_edges = list(np.arange(0,6.0,PIX_DEG)) + [np.inf]
+    pixsep_edges = np.arange(0,6.0,PIX_DEG)
     return sep_edges, pixsep_edges
 
 
@@ -140,26 +140,99 @@ def load_charm_2d(detector, R_det=2, modes=DEFAULT_CHARM_MODES,
     return np.concatenate(sep), np.concatenate(pxs), np.concatenate(w)
 
 
-def load_hnl_ref(mass, detector, R_det=2, data_dir="data"):
+def available_ref_masses(detector, R_det=2, data_dir="data"):
+    """Sorted HNL reference masses [GeV] simulated for this detector."""
+    pat = os.path.join(data_dir,
+                       f"scan_results_balloon_hnl_det{detector}_R{R_det:g}",
+                       "hnl_signal_mN_*.npz")
+    out = []
+    for f in glob.glob(pat):
+        try:
+            out.append(float(os.path.basename(f)[len("hnl_signal_mN_"):-len(".npz")]))
+        except ValueError:
+            continue
+    return np.array(sorted(out), float)
+
+
+def nearest_ref_mass(mass, detector, R_det=2, data_dir="data"):
+    """Nearest simulated reference mass to ``mass`` (in log-mass, so that e.g.
+    m_N = 2 GeV maps to the lightest available sample rather than overshooting)."""
+    avail = available_ref_masses(detector, R_det=R_det, data_dir=data_dir)
+    if not avail.size:
+        raise FileNotFoundError(
+            f"no HNL reference files for det{detector} R{R_det:g} in {data_dir}")
+    return float(avail[np.argmin(np.abs(np.log(avail) - np.log(float(mass))))])
+
+
+def load_hnl_ref(mass, detector, R_det=2, data_dir="data", allow_nearest=False):
     """HNL reference events for one mass/detector: the reweight inputs + the
-    per-event discriminators (oncam_sep_deg, mu*_pix) for tagged events."""
+    per-event discriminators (oncam_sep_deg, mu*_pix) for tagged events.
+
+    ``allow_nearest``: if the exact mass was not simulated (e.g. m_N < 5 GeV,
+    where no MomentumX.dat kinematics tables exist), fall back to the NEAREST
+    simulated mass.  The caller must still pass the TRUE target mass to
+    reweight_hnl, which recomputes the production rate and decay length there --
+    only the frozen per-event kinematics/imaging come from the reference.  See
+    SensitivityModel for the accuracy caveats."""
     path = os.path.join(data_dir,
                         f"scan_results_balloon_hnl_det{detector}_R{R_det:g}",
                         f"hnl_signal_mN_{mass:.0f}.npz")
+    if allow_nearest and not os.path.exists(path):
+        ref_mass = nearest_ref_mass(mass, detector, R_det=R_det, data_dir=data_dir)
+        path = os.path.join(data_dir,
+                            f"scan_results_balloon_hnl_det{detector}_R{R_det:g}",
+                            f"hnl_signal_mN_{ref_mass:.0f}.npz")
     return np.load(path, allow_pickle=True)
 
 
 # --------------------------------------------------------------------------- #
 # Reweighting a reference sample to (m_N, U2)
 # --------------------------------------------------------------------------- #
-def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
+def _br_mumu_rescale(ref, m_N):
+    """BR(N4 -> nu mu- mu+) ratio target/reference, for reweighting a reference
+    sample that was simulated at a DIFFERENT mass (see load_hnl_ref's
+    ``allow_nearest``).  The stored ``meta_BR_mumu`` belongs to the reference
+    mass, and the dimuon BR is mass dependent, so the weight must be scaled by
+    BR(m_target)/BR(m_ref).
+
+    Uses the SAME SIREN calculation as the simulation itself
+    (balloon_siren.SIRENDimuonGeometry.dimuon_branching_ratio, mirrored in
+    tunnel_sensitivity.dimuon_BR).  Returns 1.0 (no-op) when the reference was
+    simulated at the target mass, and falls back to 1.0 with a one-time warning
+    if SIREN is unavailable (e.g. a plain-numpy environment)."""
+    try:
+        m_ref = float(np.ravel(ref["meta_m_N"])[0])
+    except Exception:
+        return 1.0
+    if abs(m_ref - float(m_N)) <= 1e-6:
+        return 1.0
+    try:
+        from src.tunnel_sensitivity import dimuon_BR
+        br_new, br_ref = dimuon_BR(float(m_N)), dimuon_BR(m_ref)
+    except Exception:
+        if not _br_rescale_warned:
+            _br_rescale_warned.append(True)
+            print("[hnl_sensitivity] WARNING: SIREN unavailable -- BR_mumu left "
+                  "frozen at the reference mass for extrapolated masses")
+        return 1.0
+    return (br_new / br_ref) if br_ref > 0 else 0.0
+
+
+_br_rescale_warned = []   # module-level latch so the warning prints only once
+
+
+def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT, sep_angle_cut=True):
     """Return (sep, pix_sep, weight) for the reference HNL events reweighted to
     (m_N, U2).
 
     General importance reweight using the stored proposal density
     ``sampling_pdf`` q(decay_dist): the decay-position weight for the target is
     decay_pos_probability = p_target(decay_dist) / q(decay_dist).  Applies the
-    same tag as charm (both muons above threshold on the shared camera)."""
+    same tag as charm (both muons above threshold on the shared camera).
+
+    If ``ref`` was simulated at a different mass (sub-5 GeV extrapolation), the
+    stored dimuon branching ratio is rescaled to the target mass via SIREN; the
+    per-event kinematics/imaging remain frozen at the reference mass."""
     from src.xs_and_decays import HNL_decay_length
     E = np.asarray(ref["hnl_energy"], float)
     d = np.asarray(ref["decay_dist"], float)
@@ -172,7 +245,8 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
                             np.exp(-d / L) / (L * (1.0 - np.exp(-d_max / L))), 0.0)
         dpp = np.where((decay_prob > 0) & (q > 0), p_target / q, 0.0)
     ip = float(geom.compute_weighted_production_rate(m_N, U2)[0])
-    br = float(np.ravel(ref["meta_BR_mumu"])[0])
+    # dimuon BR at the TARGET mass: stored value (reference mass) x SIREN ratio
+    br = float(np.ravel(ref["meta_BR_mumu"])[0]) * _br_mumu_rescale(ref, m_N)
     cw = float(np.ravel(ref["meta_cherenkov_weight"])[0])
     # Normalize by N_samples (beam MC events THROWN), NOT meta_n_events: cw
     # already rescales the imaged sample up to the full valid sample, and the MC
@@ -183,8 +257,8 @@ def reweight_hnl(geom, ref, m_N, U2, min_photons=MIN_PHOTONS_DEFAULT):
     both = ((np.asarray(ref["mu1_n_ph"], float) >= min_photons)
             & (np.asarray(ref["mu2_n_ph"], float) >= min_photons)
             & np.asarray(ref["same_detector"], bool)
-            & np.isfinite(ref["oncam_sep_deg"])
-            & (np.asarray(ref["oncam_sep_deg"], float) < SEP_CUT_PIX * PIX_DEG))
+            & np.isfinite(ref["oncam_sep_deg"]))
+    if sep_angle_cut: both &= (np.asarray(ref["oncam_sep_deg"], float) < SEP_CUT_PIX * PIX_DEG)
     return (np.asarray(ref["oncam_sep_deg"], float)[both],
             pix_beamline_angle(ref)[both], np.asarray(w)[both])
 
@@ -227,12 +301,12 @@ def save_all_contours(path, detectors=(2, 5, 8), R_det=2,
                       masses=(5, 6, 7, 8, 9, 10, 12, 14, 16, 20, 25, 30),
                       levels=(2.0, 5.0), min_photons=MIN_PHOTONS_DEFAULT,
                       modes=DEFAULT_CHARM_MODES, had_veto=True, data_dir="data",
-                      key="Z2d"):
+                      key="Z2d", U2_grid=None):
     """Save contours for ALL detectors into ONE .npz, Balloon.ipynb-style: keys
     '<detector>_<photon_threshold>_<level>' (+ '..._count') -> (m_N, U2) points."""
     merged = {}
     for det in detectors:
-        m = SensitivityModel(detector=det, R_det=R_det, masses=masses,
+        m = SensitivityModel(detector=det, R_det=R_det, masses=masses, U2_grid=U2_grid,
                              min_photons=min_photons, modes=modes,
                              had_veto=had_veto, data_dir=data_dir)
         g = m.significance_grid()
@@ -254,7 +328,24 @@ class SensitivityModel:
 
     def __init__(self, detector=8, R_det=2, masses=(5, 10, 20, 30, 50),
                  min_photons=MIN_PHOTONS_DEFAULT, modes=DEFAULT_CHARM_MODES,
-                 had_veto=True, data_dir="data", U2_grid=None):
+                 had_veto=True, data_dir="data", U2_grid=None,
+                 allow_nearest_ref=True):
+        """``allow_nearest_ref`` (default True): permit requested masses that were
+        never simulated -- notably m_N < 5 GeV, where no MomentumX.dat kinematics
+        tables exist -- by reusing the NEAREST simulated reference sample and
+        reweighting it to the true target mass with reweight_hnl (which
+        recomputes the production rate and the decay length there).
+
+        Accuracy below the lightest simulated mass: production sigma(E, m_N), the
+        decay length, and the dimuon branching ratio are all evaluated at the TRUE
+        target mass (BR_mumu via SIREN, see _br_mumu_rescale).  Only the per-event
+        HNL kinematics and imaging (energies, angles, oncam_sep_deg, pix_sep,
+        photon counts) stay FROZEN at the reference mass.  This follows
+        balloon.compute_reweighted_signal_at_satellite ("a good approximation at
+        low HNL mass, where the dominant dependence is through the decay
+        length"), so sub-5 GeV contours remain an extrapolation in the decay
+        kinematics -- but no longer in the rate normalisation.
+        Set allow_nearest_ref=False to hard-fail on missing masses."""
         self.detector = detector
         self.R_det = R_det
         self.masses = list(masses)
@@ -273,8 +364,24 @@ class SensitivityModel:
                                     data_dir=data_dir)
         self.B, _ = np.histogram(cps, self.pixsep_edges, weights=cw)
         self.B_total = float(cw.sum())
-        self.refs = {m: load_hnl_ref(m, detector, R_det=R_det, data_dir=data_dir)
+        self.allow_nearest_ref = allow_nearest_ref
+        self.refs = {m: load_hnl_ref(m, detector, R_det=R_det, data_dir=data_dir,
+                                     allow_nearest=allow_nearest_ref)
                      for m in self.masses}
+        # record which masses were extrapolated from a different reference sample
+        self.ref_mass_used = {}
+        for m in self.masses:
+            used = float(np.ravel(self.refs[m]["meta_m_N"])[0])
+            self.ref_mass_used[m] = used
+        self.extrapolated_masses = [m for m in self.masses
+                                    if abs(self.ref_mass_used[m] - m) > 1e-6]
+        if self.extrapolated_masses:
+            pairs = ", ".join(f"{m:g}<-{self.ref_mass_used[m]:g}"
+                              for m in self.extrapolated_masses)
+            print(f"[hnl_sensitivity] det{detector}: reweighting from nearest "
+                  f"reference mass for {pairs} [GeV] (production, decay length "
+                  f"and BR_mumu evaluated at the target mass; per-event "
+                  f"kinematics/imaging frozen at the reference mass)")
 
     def signal_hist(self, m_N, U2):
         """1D pix_sep signal histogram (after the opening-angle pre-cut)."""

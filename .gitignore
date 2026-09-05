@@ -64,3 +64,5 @@ notes/*.pdf
 notes/*.toc
 
 madgraph_xs
+
+diagnostics/

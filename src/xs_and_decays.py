@@ -203,6 +203,7 @@ def HNL_ee_decay_width(m_N, Umu2, Ue2, d=0):
     term_mu = Umu2 * (1 - 4 * sin2_theta_W + 8 * sin2_theta_W**2)
     term_e = Ue2 * (1 + 4 * sin2_theta_W + 8 * sin2_theta_W**2)
     mixing_gamma = prefactor * (term_mu + term_e)
+    mixing_gamma *= (m_N > 2*m_e)
 
     r = m_e/m_N
     a = 1 - r**2

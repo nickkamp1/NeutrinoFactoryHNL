@@ -433,12 +433,11 @@ class SensitivityModel:
     def significance_map(self, grid=None, key="Z2d", n_mass=120, n_u2=120):
         """Interpolate log10(Z) onto a fine (m_N, U2) grid (mass is only simulated
         at discrete points; U2 is continuous via reweighting).  Returns (M,U2,Z)."""
-        from scipy.interpolate import RegularGridInterpolator
+        from scipy.interpolate import CloughTocher2DInterpolator
         grid = grid if grid is not None else self.significance_grid()
         logm = np.log10(grid["masses"]); logu = np.log10(grid["U2"])
         Zfloor = np.maximum(grid[key], 1e-3)
-        interp = RegularGridInterpolator((logm, logu), np.log10(Zfloor),
-                                         bounds_error=False, fill_value=None)
+        interp = CloughTocher2DInterpolator(np.array([[m, u] for m in logm for u in logu]), np.log10(Zfloor.ravel()))
         mfine = np.logspace(logm[0], logm[-1], n_mass)
         ufine = np.logspace(logu[0], logu[-1], n_u2)
         M, U2 = np.meshgrid(mfine, ufine, indexing="ij")

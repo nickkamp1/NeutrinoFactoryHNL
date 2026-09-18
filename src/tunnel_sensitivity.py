@@ -43,7 +43,7 @@ E_MU, DUMP_DEPTH, DUMP_ANGLE = 5000.0, 100.0, 1.53
 # TUNNEL_RADIUS.  Production points sit at z in [-L_target, 0] (upstream).
 TUNNEL_START = -1400.0       # m from the surface exit to the tunnel mouth
 TUNNEL_LENGTH = 100.0    # m
-TUNNEL_RADIUS = 10.0      # m
+TUNNEL_RADIUS = 5.0      # m
 # Rock buffer (shielding) between the production region and the cavity mouth [m].
 # HNLs must be produced at least this far upstream to count, i.e. they must
 # survive an extra exp(-buffer/L_decay).  This is what closes the band at high

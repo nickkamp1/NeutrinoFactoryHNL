@@ -134,24 +134,67 @@ def sample_numu_from_muon_decay(E_mu, P_mu=0.0):
     return E_nu_lab, cos_theta_lab
 
 
-def HNL_decay_width(m_N, U2, d=0):
-    """Calculate the decay width of a Heavy Neutral Lepton (HNL).
+_SIREN_WIDTH_CACHE = {}
+
+
+def siren_total_decay_width(m_N, nature="Majorana"):
+    """Total HNL decay width at |U_mu|^2 = 1 [GeV], summed over ALL SIREN final states.
+
+    SIREN's mixing vector holds the amplitude U (verified: width scales as U^2), so
+    a unit entry gives the width per unit U^2 and the caller multiplies by U2.
+
+    Needs the lienv environment (SIREN).  Cached per (m_N, nature): one HNLDecay
+    construction per mass, not per call.
+    """
+    if m_N <= 0:
+        return 0.0
+    key = (round(float(m_N), 9), nature)
+    if key not in _SIREN_WIDTH_CACHE:
+        from siren import interactions, dataclasses      # lazy: needs lienv
+        chiral = (interactions.HNLDecay.ChiralNature.Majorana if nature == "Majorana"
+                  else interactions.HNLDecay.ChiralNature.Dirac)
+        dec = interactions.HNLDecay(float(m_N), [0.0, 1.0, 0.0], chiral)
+        w = 0.0
+        for sig in dec.GetPossibleSignatures():
+            rec = dataclasses.InteractionRecord()
+            rec.signature = sig
+            # same value for every signature; query once
+            w = dec.TotalDecayWidthAllFinalStates(rec)
+            break
+        _SIREN_WIDTH_CACHE[key] = float(w)
+    return _SIREN_WIDTH_CACHE[key]
+
+
+def HNL_decay_width(m_N, U2, d=0, nature="Majorana"):
+    """Calculate the TOTAL decay width of a Heavy Neutral Lepton (HNL).
+
+    The mixing-induced part is SIREN's sum over all open final states, NOT the
+    single-channel G_F^2 m_N^5 U^2 / (192 pi^3) formula used previously -- that
+    counts one muon-like channel and is ~20x too small above the pion threshold
+    (23x at m_N = 38 GeV, Majorana), and fails completely above m_W where the
+    on-shell N -> l W / nu Z channels break the m_N^5 scaling entirely.
 
     Parameters:
-    m_N : float
+    m_N : float or array
         Mass of the HNL in GeV.
     U2 : float
         Mixing parameter squared.
     d : float
         Transition magnetic moment in GeV^-1.
+    nature : str
+        "Majorana" (default, used throughout the paper) or "Dirac".  Majorana is
+        exactly 2x Dirac.
 
     Returns:
-    float
+    float or array
         Decay width in GeV.
     """
-    G_F = 1.1663787e-5 # Fermi coupling constant in GeV^-2
-    mixing_gamma = (G_F**2 * m_N**5 * U2) / (192 * np.pi**3)
-    magnetic_gamma = (d**2 * m_N**3) / (4 * np.pi)
+    m_arr = np.atleast_1d(np.asarray(m_N, dtype=float))
+    mixing = np.array([siren_total_decay_width(m, nature) for m in m_arr]) * U2
+    mixing_gamma = mixing.reshape(np.shape(m_arr))
+    if np.ndim(m_N) == 0:
+        mixing_gamma = float(mixing_gamma[0])
+    magnetic_gamma = (d**2 * np.asarray(m_N, dtype=float)**3) / (4 * np.pi)
     return mixing_gamma + magnetic_gamma
 
 

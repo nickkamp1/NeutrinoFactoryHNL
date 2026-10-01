@@ -196,18 +196,26 @@ def electron_shower_length_in_air(E_e_GeV, start_altitude_m):
 
 
 def hadronic_shower_cherenkov(E_had, had_dir, r_rel, altitude_m,
-                              sigma_had=10 * np.pi / 180):
+                              sigma_had=None):
     """
     Cherenkov photons from a hadronic shower using the track-length-integral
     approach (Nerling et al. 2006).
 
-    Total Cherenkov yield is altitude-independent:
-        N_ph_total = f_EM(E) × (E / E_c) × C_CH
-    where f_EM = 1 - E^{-0.14} (Gaisser) and C_CH ≈ 19,200 photons/(E/E_c).
+    Total Cherenkov yield:
+        N_ph_total = f_EM(E) × (E / E_c) × C_CH × W(h)
+    where f_EM = 1 - E^{-0.14} is the electromagnetic fraction of the hadronic
+    cascade (Groom, NIM A572 (2007) 633; Gabriel et al., NIM A338 (1994) 336),
+    C_CH ≈ 19,200 photons/(E/E_c) is the Frank-Tamm yield times the
+    Approximation-B track length X_0/rho, and W(h) ≈ 0.45 is the fraction of
+    that track length above the Cherenkov threshold, from integrating the
+    Nerling+2006 universal electron spectrum (see cherenkov_track_fraction).
+    Without W the yield is ~2.2x too high, since X_0 (E/E_c) counts the whole
+    charged path down to zero energy while only E > E_thr(h) radiates.
 
-    The hadronic angular spread (σ ~ 10°) >> Cherenkov angle (θ_C ~ 1.4°),
+    The shower angular spread (σ ~ 6-7°) >> Cherenkov angle (θ_C ~ 1.4°),
     so the ring structure is smeared into a Gaussian centered on the shower
-    axis. The geometric acceptance is:
+    axis, with σ matched to the RMS of the Nerling+2006 angular distribution
+    (see shower_angular_sigma). The geometric acceptance is:
         Φ = (A_det / 2πσ²d²) × exp(-α² / 2σ²)
     where α = angle between shower axis and direction to detector.
 
@@ -221,8 +229,9 @@ def hadronic_shower_cherenkov(E_had, had_dir, r_rel, altitude_m,
         Shower position relative to detector [m] (= shower_pos - det_pos)
     altitude_m : float
         Shower altitude [m] (for atmospheric transmission)
-    sigma_had : float
-        Angular spread of shower particles [rad] (default 10°)
+    sigma_had : float or None
+        Angular spread of shower particles [rad].  Default (None) uses the
+        altitude-dependent Nerling+2006 RMS, ~6-7°.
 
     Returns
     -------
@@ -232,9 +241,14 @@ def hadronic_shower_cherenkov(E_had, had_dir, r_rel, altitude_m,
     if E_had <= 1.0:
         return 0.0
 
-    # Total Cherenkov photons (altitude-independent)
+    if sigma_had is None:
+        sigma_had = shower_angular_sigma(altitude_m)
+
+    # Total Cherenkov photons: track-length integral restricted to the
+    # radiating (above-threshold) part of the cascade.
     f_EM = 1.0 - E_had**(-0.14)
-    N_ph_total = f_EM * (E_had / E_CRITICAL_AIR) * C_CH
+    N_ph_total = (f_EM * (E_had / E_CRITICAL_AIR) * C_CH
+                  * cherenkov_track_fraction(altitude_m))
 
     # Geometric acceptance: Gaussian angular distribution
     d = np.linalg.norm(r_rel)

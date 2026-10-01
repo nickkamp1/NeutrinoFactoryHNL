@@ -1,4 +1,6 @@
 import numpy as np
+from functools import lru_cache
+from scipy.integrate import quad
 from scipy.interpolate import RegularGridInterpolator
 
 # Default physical constants
@@ -120,6 +122,74 @@ def get_cherenkov_yield_per_meter(n=N_AIR, lambda_min=LAMBDA_MIN, lambda_max=LAM
     """
     theta_C = get_cherenkov_angle(n)
     return 2 * np.pi * ALPHA * np.sin(theta_C)**2 * (1/lambda_min - 1/lambda_max)
+
+
+ELECTRON_MASS_MEV = 0.510999
+
+
+def _delta_n(altitude_m):
+    """Refractive index minus one at altitude."""
+    return (N_AIR - 1.0) * np.exp(-altitude_m / _H_SCALE)
+
+
+def cherenkov_threshold_MeV(altitude_m):
+    """Electron Cherenkov threshold E_thr = m c^2 / sqrt(2 delta)  [MeV]."""
+    return ELECTRON_MASS_MEV / np.sqrt(2 * _delta_n(altitude_m))
+
+
+def _nerling_fe(E_MeV, s):
+    """Universal electron energy spectrum, Nerling+2006 eqs. 17-19 (Ecut = 1 MeV).
+
+    Normalised so that int f_e dlnE = 1 above Ecut.
+    """
+    a0 = 1.45098e-1 * np.exp(6.20114 * s - 5.96851e-1 * s * s)
+    a1 = 6.42522 - 1.53183 * s
+    a2 = 168.168 - 42.1368 * s
+    return a0 * E_MeV / ((E_MeV + a1) * (E_MeV + a2) ** s)
+
+
+@lru_cache(maxsize=4096)
+def _track_fraction_cached(E_thr_MeV, s):
+    integ = lambda lE: _nerling_fe(np.exp(lE), s) * (1.0 - (E_thr_MeV / np.exp(lE)) ** 2)
+    return quad(integ, np.log(E_thr_MeV), np.log(1e6), limit=200)[0]
+
+
+def cherenkov_track_fraction(altitude_m, s=1.0):
+    """Fraction of EM-cascade track length that actually radiates Cherenkov light.
+
+    The Approximation-B track length X_0 (E/E_c) counts every charged path down to
+    zero energy, but only electrons above E_thr(h) radiate, and their yield carries
+    the factor sin^2(theta)/2delta = 1 - (E_thr/E)^2.  Integrating the Nerling+2006
+    universal spectrum over ln E from threshold gives that fraction (~0.45 at
+    shower max near sea level, i.e. the naive integral overestimates by ~2.2x).
+
+    Evaluated at shower maximum (s=1), which dominates the track-length integral.
+    """
+    # ponytail: rounded to 100 m so lru_cache actually hits inside MC loops;
+    # W varies by <1% over that range.
+    alt = float(np.round(np.asarray(altitude_m, dtype=float) / 100.0) * 100.0)
+    return _track_fraction_cached(round(cherenkov_threshold_MeV(alt), 3), s)
+
+
+def shower_angular_sigma(altitude_m, s=1.0):
+    """Gaussian sigma [rad] matching the RMS of the Nerling+2006 Cherenkov angular
+    distribution about the shower axis (their eq. 12 + 21-23).
+
+    A_gamma(theta) = a_s exp(-theta/theta_c)/theta_c + b_s exp(-theta/theta_cc)/theta_cc,
+    normalised in dtheta, with theta_cc = gamma theta_c.  The code's acceptance uses a
+    2D Gaussian in solid angle (Rayleigh in theta, RMS = sqrt(2) sigma), so sigma is
+    fixed by matching <theta^2>.  Gives ~7.0 deg at sea level, ~6.0 deg at 5 km --
+    somewhat narrower than the 10 deg previously assumed.
+    """
+    # ponytail: theta_c = alpha * E_thr^-beta comes out in RADIANS, not degrees --
+    # the only reading consistent with the ~40 deg narrow/broad crossover in their Fig. 14.
+    E_thr = cherenkov_threshold_MeV(altitude_m)
+    theta_c = 0.62694 * E_thr ** -0.60590
+    g = 10.509 - 4.9644 * s
+    a = 4.2489e-1 + 5.8371e-1 * s - 8.2373e-2 * s * s
+    b = 5.5108e-2 - 9.5587e-2 * s + 5.6952e-2 * s * s
+    mean_sq = 2.0 * (a * theta_c ** 2 + b * (g * theta_c) ** 2) / (a + b)
+    return np.sqrt(mean_sq / 2.0)
 
 
 def orthonormal_basis(p_hat):
